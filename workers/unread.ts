@@ -1,3 +1,4 @@
+import type { SidebarThreadDTO } from '../shared/types'
 type D1Reader = Pick<D1Database, 'prepare'>
 
 export const channelUnreadSql = `
@@ -74,7 +75,7 @@ export async function channelUnreadCounts(
 }
 
 /**
- * Threads with a message since `since`, or with messages the member has not
+ * Threads created or active since `since`, or with messages the member has not
  * read in a thread they have opened before. Threads they never opened do not
  * count as unread here; the parent channel already reports that activity.
  */
@@ -82,17 +83,17 @@ export const recentThreadsSql = `
   SELECT t.id AS id,
          t.parent_id AS parentId,
          t.name AS title,
-         MAX(m.created_at) AS lastMessageAt,
+         COALESCE(MAX(m.created_at), t.created_at) AS lastMessageAt,
          MAX(cr.last_read_message_id IS NOT NULL) AS opened,
          CAST(SUM(CASE
            WHEN cr.last_read_message_id IS NOT NULL AND cr.last_read_message_id < m.id THEN 1 ELSE 0
          END) AS INTEGER) AS unreadCount
   FROM channels t
-  JOIN messages m ON m.channel_id = t.id
+  LEFT JOIN messages m ON m.channel_id = t.id
   LEFT JOIN channel_reads cr ON cr.channel_id = t.id AND cr.user_id = ?
   WHERE t.type = 'thread' AND t.parent_id IS NOT NULL
   GROUP BY t.id
-  HAVING MAX(m.created_at) >= ? OR unreadCount > 0
+  HAVING COALESCE(MAX(m.created_at), t.created_at) >= ? OR unreadCount > 0
 `
 
 export type RecentThreadRow = {
@@ -107,4 +108,21 @@ export type RecentThreadRow = {
 export async function recentThreads(db: D1Reader, userId: string, since: string): Promise<RecentThreadRow[]> {
   const rows = await db.prepare(recentThreadsSql).bind(userId, since).all<RecentThreadRow>()
   return (rows.results ?? []).map(row => ({ ...row, opened: Boolean(row.opened), unreadCount: Number(row.unreadCount) }))
+}
+
+/** Apply the same navigation window and access filter to channels and DMs. */
+export async function sidebarThreads(db: D1Reader, userId: string, parentIds: string[]): Promise<SidebarThreadDTO[]> {
+  if (!parentIds.length) return []
+  const visible = new Set(parentIds)
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const groups = new Map<string, SidebarThreadDTO[]>()
+  for (const row of await recentThreads(db, userId, since)) {
+    if (!visible.has(row.parentId)) continue
+    const group = groups.get(row.parentId) ?? []
+    group.push({ ...row, unread: row.unreadCount > 0 })
+    groups.set(row.parentId, group)
+  }
+  return [...groups.values()].flatMap(group => group
+    .sort((a, b) => Number(b.unread) - Number(a.unread) || b.lastMessageAt.localeCompare(a.lastMessageAt))
+    .slice(0, 5))
 }

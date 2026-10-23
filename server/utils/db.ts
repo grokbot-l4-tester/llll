@@ -12,6 +12,8 @@ import codeEnvironmentsSql from '../../drizzle/server-migrations/0008_code_envir
 import serverOriginsSql from '../../drizzle/server-migrations/0009_server_origins.sql?raw'
 import serverSettingsSql from '../../drizzle/server-migrations/0010_server_settings.sql?raw'
 import dmPrivacySql from '../../drizzle/server-migrations/0011_dm_privacy.sql?raw'
+import storageChannelsSql from '../../drizzle/server-migrations/0012_server_storage_and_channels.sql?raw'
+import modelCallsSql from '../../drizzle/server-migrations/0013_agent_model_calls.sql?raw'
 import { schema } from '../../drizzle/schema'
 import { isUuidV4 } from '../../shared/server-settings'
 
@@ -47,6 +49,8 @@ export const INIT_SQL = d1ExecSql([
   serverOriginsSql,
   serverSettingsSql,
   dmPrivacySql,
+  storageChannelsSql,
+  modelCallsSql,
 ].join('\n--> statement-breakpoint\n'))
 
 /** Bootstrap is only for an empty database. Deployed changes use D1 migrations. */
@@ -76,6 +80,12 @@ export async function ensureMigrated(db: D1Database, env?: { LLLL_RUNTIME?: stri
   await Promise.all([
     db.prepare('SELECT kind FROM users LIMIT 1').first(),
     db.prepare('SELECT user_id FROM agents LIMIT 1').first(),
+  ])
+  // The installer applies additive SQL before uploading code. Defer incompatible
+  // conversation changes until this new Worker is actually serving the database.
+  await db.batch([
+    db.prepare("UPDATE channels SET type='text', visibility='private', created_by=dm_owner_id, name=CASE WHEN name='dm' THEN 'private-chat-'||substr(id,1,8) ELSE name END WHERE type='dm' AND dm_kind='group'"),
+    db.prepare("UPDATE channels SET created_by=(SELECT actor_id FROM audit_log WHERE action='channel.create' AND target_id=channels.id ORDER BY created_at LIMIT 1) WHERE type='text' AND created_by IS NULL"),
   ])
   migratedDatabases.add(db)
   return true
