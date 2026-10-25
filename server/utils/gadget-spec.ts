@@ -56,7 +56,7 @@ export function parseGadgetSpec(value: unknown): GadgetSpec {
 export async function validateGadgetSpec(
   env: L4Env,
   value: unknown,
-  options: { publish?: boolean, authorization?: AuthorizationContext } = {},
+  options: { publish?: boolean; authorization?: AuthorizationContext } = {},
 ): Promise<GadgetSpec> {
   const spec = parseGadgetSpec(value)
   if (options.publish && (!spec.bindings.length || !spec.sections.length)) {
