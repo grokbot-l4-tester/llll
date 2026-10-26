@@ -1,6 +1,7 @@
+import { reactive, readonly } from 'vue'
 import { describe, expect, it } from 'vitest'
 import { authorizeResource, resourceAllowed, type AuthorizationContext } from '../../shared/authorization'
-import { parseResourceAccess, resourceAccessWithin } from '../../shared/resource-access'
+import { cloneResourceAccess, parseResourceAccess, resourceAccessWithin } from '../../shared/resource-access'
 import { authorizeResourceRequest } from '../../server/utils/resource-policy'
 import type { L4Env } from '../../workers/env'
 
@@ -40,4 +41,16 @@ describe('resource authorization', () => {
     await expect(authorizeResourceRequest(env, context(), '/api/documents/document-public')).resolves.toBeUndefined()
     await expect(authorizeResourceRequest(env, context(), '/api/servers/server/documents')).rejects.toThrow('not granted')
   })
+})
+
+it('clones reactive and readonly Role scopes without sharing mutable arrays', () => {
+ const original = reactive({ projects: ['project-a'], boards: null, repositories: [] as string[] })
+ for (const source of [original, readonly(original)]) {
+  const copy = cloneResourceAccess(source)
+  expect(copy).toEqual({ projects: ['project-a'], boards: null, repositories: [] })
+  copy.projects!.push('project-b')
+  copy.repositories!.push('repo')
+  expect(original.projects).toEqual(['project-a'])
+  expect(original.repositories).toEqual([])
+ }
 })
