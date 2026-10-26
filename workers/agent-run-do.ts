@@ -9,7 +9,6 @@ import type { L4Env } from './env'
 import { asRpc } from './env'
 import { RUN_QUEUE_WAIT_MS, type AgentRun, type RunMandate, type RuntimeEvent } from '../shared/agent-execution'
 import { findAgentRun, runAuthorization, runCapability } from '../server/utils/agent-run-service'
-import { previousRunFiles, workingFilesSchema } from '../server/utils/agent-files'
 import { toolsForRun } from '../server/utils/agent-tools'
 import { runEmbeddedPi, type EmbeddedPiSubmission } from './agent-pi-durable'
 import { deliverAgentRun } from '../server/utils/agent-run-delivery'
@@ -208,6 +207,11 @@ export class AgentRunDurableObject extends DurableObject<L4Env> {
       const files = fileStorage(this.env)
       if (!files) throw new Error('Pi file storage unavailable')
       const mandate = JSON.parse(run.mandateJson) as RunMandate
+      if (mandate.computer && (this.env.AGENT_COMPUTE || this.env.AGENT_RUNNER_URL)
+        && await this.ctx.storage.get<boolean>('submitted')
+        && await this.ctx.storage.get<string>('computerPolicy') !== 'server-broker-only') {
+        throw new Error('Legacy computer execution interrupted; a new attempt requires Server review policy')
+      }
       if (!await this.ctx.storage.get<boolean>('submitted')) {
         phase = 'readiness'
         const ready = await this.runtime(run, 'health')
@@ -221,7 +225,10 @@ export class AgentRunDurableObject extends DurableObject<L4Env> {
         const capability = await runCapability(this.env, run.id)
         // Record intent before the network operation. If the executor disappears,
         // fail this attempt rather than silently starting its work a second time.
-        if (this.env.AGENT_COMPUTE || this.env.AGENT_RUNNER_URL) await this.ctx.storage.put('submitted', true)
+        if (this.env.AGENT_COMPUTE || this.env.AGENT_RUNNER_URL) {
+          await this.ctx.storage.put('computerPolicy', 'server-broker-only')
+          await this.ctx.storage.put('submitted', true)
+        }
         phase = 'submission'
         const started = await this.runtime(run, 'run', 'POST', {
           runId: run.id, sessionId: run.sessionId, prompt: run.prompt,
@@ -229,9 +236,10 @@ export class AgentRunDurableObject extends DurableObject<L4Env> {
           modelGateway: { url: `${origin}/api/agent-runs/${run.id}/gateway/v1`, token: capability, model: run.model },
           toolEndpoint: `${origin}/api/agent-runs/${run.id}/gateway/tools`,
           repository: run.environmentJson ? { archiveUrl: `${origin}/api/agent-runs/${run.id}/gateway/repository/archive` } : undefined,
-          filesUrl: mandate.computer && await previousRunFiles(this.env, run) ? `${origin}/api/agent-runs/${run.id}/gateway/files` : undefined,
           tools: (await toolsForRun(this.env, authorization, promise => this.ctx.waitUntil(promise), run)).descriptors,
-          computer: mandate.computer, maxSteps: mandate.maxSteps, transcript,
+          // A repository mandate is not approval of model-selected local commands.
+          // Native Pi tools bypass the Server's per-call policy and audit boundary.
+          computer: false, maxSteps: mandate.maxSteps, transcript,
           timeoutMs: Math.min(900000, Math.max(1000, Date.parse(run.deadline) - Date.now())),
         })
         if (!started.ok) throw new Error(`Executor rejected the run (${started.status})`)
@@ -251,7 +259,9 @@ export class AgentRunDurableObject extends DurableObject<L4Env> {
       const toolEvent = [...poll.events].reverse().find(event => event.type === 'tool')
       const partial = poll.events.filter((event): event is Extract<RuntimeEvent, { type: 'text' }> => event.type === 'text').map(event => event.text).join('')
       if (toolEvent?.type === 'tool' || partial) {
-        await patchAgentTurn(this.env, run.id, { status: toolEvent?.type === 'tool' ? 'tool' : 'thinking', detail: safeRunProgress(toolEvent?.type === 'tool' ? 'tool' : 'thinking') })
+        const waiting = await this.env.DB.prepare("SELECT 1 FROM factory_actions WHERE run_id=? AND status='pending' AND expires_at>? LIMIT 1").bind(run.id, nowIso()).first()
+        const progress = waiting ? 'waiting_approval' : toolEvent?.type === 'tool' ? 'tool' : 'thinking'
+        await patchAgentTurn(this.env, run.id, { status: progress, detail: safeRunProgress(progress) })
         await fanoutAgentTurns(this.env, run.channelId, run.agentId)
       }
       const terminal: RuntimeEvent | undefined | null = poll.result || [...poll.events].reverse().find(event => event.type === 'result' || event.type === 'error')
@@ -269,19 +279,8 @@ export class AgentRunDurableObject extends DurableObject<L4Env> {
         await files.put(key, saved.transcript, { httpMetadata: { contentType: 'application/x-ndjson' } })
         await this.env.DB.prepare('UPDATE agent_sessions SET transcript_key=? WHERE id=? AND active_run_id=?').bind(key, run.sessionId, run.id).run()
       }
-      if (mandate.computer) {
-        const output = await this.runtime(run, 'files')
-        const contents = await readLimitedStream(output.body, 2000000)
-        if (output.ok && contents.ok) {
-          const snapshot = workingFilesSchema.parse(JSON.parse(new TextDecoder().decode(contents.bytes)))
-          const key = `agent-files/${run.sessionId}/${run.id}.json`
-          await files.put(key, JSON.stringify(snapshot), { httpMetadata: { contentType: 'application/json' } })
-          await this.env.DB.prepare('UPDATE agent_runs SET files_key=? WHERE id=?').bind(key, run.id).run()
-        } else {
-          await this.env.DB.prepare('INSERT INTO agent_run_events(run_id,sequence,event_json,created_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING')
-            .bind(run.id, poll.nextCursor, JSON.stringify({ type: 'error', message: 'Working files could not be archived within the file limits' }), nowIso()).run()
-        }
-      }
+      // Pi has no native checkout. Reviewed coding snapshots and command receipts
+      // are persisted by the factory broker, independently of this transcript.
       if (terminal.type !== 'result' && terminal.type !== 'error') throw new Error('Missing terminal result')
       const current = terminal.type === 'error' ? await findAgentRun(this.env, run.id) : null
       const failure = terminal.type === 'error' ? current?.lastError || (current?.modelCalls === 0 && terminal.message.startsWith('Embedded Pi')
