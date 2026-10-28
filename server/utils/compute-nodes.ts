@@ -42,9 +42,11 @@ export async function disableComputeNode(env: L4Env, auth: AuthorizationContext,
     env.DB.prepare("UPDATE factory_actions SET status=CASE WHEN status IN ('claimed','executing') THEN 'uncertain' ELSE 'cancelled' END WHERE workspace_id IN (SELECT id FROM factory_workspaces WHERE node_id=?) AND status IN ('pending','approved','claimed','executing')").bind(id),
   ])
 }
-export async function requireComputeNode(env: L4Env, credential: string) {
-  const node = await env.DB.prepare('SELECT id FROM compute_nodes WHERE token_hash=? AND enabled=1').bind(await factoryHash(credential)).first<{ id: string }>()
+export async function requireComputeNode(env: L4Env, credential: string, transport: 'direct' | 'lizard' = 'direct') {
+  const node = await env.DB.prepare('SELECT id,capabilities_json AS capabilitiesJson FROM compute_nodes WHERE token_hash=? AND enabled=1').bind(await factoryHash(credential)).first<{ id: string; capabilitiesJson: string }>()
   if (!node) fail(403, 'compute_revoked', 'Compute Node authorization unavailable')
+  const provider = JSON.parse(node.capabilitiesJson).provider
+  if ((provider === 'lizard') !== (transport === 'lizard')) fail(403, 'compute_transport_denied', 'Compute Node transport does not match its provider')
   await env.DB.prepare('UPDATE compute_nodes SET last_seen=? WHERE id=?').bind(nowIso(), node.id).run()
   return node
 }
@@ -93,8 +95,8 @@ export async function computePoll(env: L4Env, nodeId: string, input: z.infer<typ
     if (!started) fail(409, 'compute_job_uncertain', 'Job was already started')
     await env.DB.prepare("UPDATE tasks SET factory_state='executing' WHERE id=? AND assignee_id=?").bind(context.run.taskId, context.run.agentId).run()
     const sourceToken = context.request.operation === 'bootstrap' ? await githubSourceGrant(env, { connectionId: context.environment.gitConnectionId, installationId: context.environment.sourceInstallationId, repositoryId: context.environment.sourceRepoId }, async () => { await authorizeFactoryAction(env, row) }) : undefined
-    return { id: row.id, workspaceId: context.workspace.id, serverId: context.auth.serverId, taskId: context.run.taskId, agentId: context.run.agentId,
-      request: context.request, executionBudgetMs: Math.max(1, Math.min(context.request.operation === 'exec' ? context.request.timeoutMs + ('provider' in context.capabilities ? 240000 : 0) : 120000, 3600000 - context.workspace.runtimeMs, Date.parse(row.expiresAt) - Date.now())), image: context.capabilities.image, baseSha: context.environment.baseSha, repository: context.environment.sourceRepo,
+    return { id: row.id, workspaceId: context.workspace.id, serverId: context.auth.serverId, taskId: context.run.taskId, agentId: context.run.agentId, diskBytes: context.capabilities.diskBytes,
+      request: context.request, executionBudgetMs: Math.max(1, Math.min(context.request.operation === 'exec' ? context.request.timeoutMs + ('provider' in context.capabilities ? 240000 : 0) : 120000, (JSON.parse(context.run.mandateJson).execution?.workspaceRuntimeMs ?? 3600000) - context.workspace.runtimeMs, Date.parse(row.expiresAt) - Date.now())), image: context.capabilities.image, baseSha: context.environment.baseSha, repository: context.environment.sourceRepo,
       // Only the trusted fetch broker consumes this single-repository READ token, then revokes it. Never mount it in a workspace.
       ...(sourceToken ? { sourceToken } : {}) }
   }

@@ -123,7 +123,24 @@ export type TaskDTO = {
 export type TaskDetailDTO = TaskDTO & {
   checklist: TaskChecklistItemDTO[]
   attachments: TaskAttachmentDTO[]
+  /** The chat message the task was created from, as this viewer may see it. */
+  source?: TaskSourceDTO | null
 }
+
+/**
+ * `restricted`: the viewer cannot read the source conversation and sees nothing about it.
+ * `deleted`: the message is gone; the conversation is still linked.
+ */
+export type TaskSourceDTO =
+  | { state: 'available'; channelName: string; path: string; authorName: string | null; excerpt: string }
+  | { state: 'deleted'; channelName: string; path: string }
+  | { state: 'restricted' }
+
+/** A task created from a message in the conversation being viewed. */
+export type TaskSourceLinkDTO = { taskId: string; number: number; title: string; messageId: string }
+
+/** A Task form prefilled from a chat message. */
+export type TaskMessageDraftDTO = { messageId: string; channelName: string; authorName: string | null; title: string; description: string }
 
 export type TaskBoardDTO = {
   id: string
@@ -439,7 +456,10 @@ export type MessageDTO = {
   author: PublicUser
   content: string
   replyTo: ReplyPreviewDTO | null
+  /** Members mentioned directly. */
   mentions: string[]
+  /** Roles whose mention reached at least one Member. */
+  roleMentions?: string[]
   attachments: AttachmentDTO[]
   reactions: ReactionDTO[]
   pin: MessagePinDTO | null
@@ -457,6 +477,12 @@ export type MessageSearchChannelDTO = {
   type: ChannelType
   parentId: string | null
   parentMessageId: string | null
+  /** The channel name or DM title; for a thread, its parent conversation's. */
+  title: string
+  /** App path of the conversation or thread holding the hit. */
+  path: string
+  /** The hit's channel (or a Thread's parent) is archived: still readable, closed to new activity. */
+  archived?: boolean
 }
 
 export type MessageSearchHitDTO = {
@@ -565,6 +591,19 @@ export type ChannelDTO = {
   lastAgentMessage?: string | null
   agentWorking?: boolean
   lastMessageAt?: string | null
+  /** When the channel, or a Thread's parent channel, was archived: readable, but closed to new activity. */
+  archivedAt?: string | null
+}
+
+/** An archived Chat channel listed in Server settings for restore. */
+export type ArchivedChannelDTO = {
+  id: string
+  name: string
+  topic: string
+  visibility: ChannelVisibility
+  createdBy: string | null
+  archivedAt: string
+  archivedBy: { id: string, displayName: string } | null
 }
 
 /** A recently active thread shown under its channel in the navigation. */
@@ -588,11 +627,15 @@ export type RoleDTO = {
   permissions: number
   position: number
   isSystem: boolean
+  /** Anyone may mention it; otherwise only the Owner and Members with Manage channels can. */
+  mentionable?: boolean
   memberCount?: number
+  policyCount?: number
 }
 
 export type MemberDTO = {
   user: PublicUser
+  projectPolicies?: import('./project-access').ProjectPolicyGrant[]
   agentStatus?: AgentDTO['status']
   role: RoleDTO
   nickname: string | null
@@ -644,38 +687,51 @@ export type RuntimeCapabilities = {
   callsProvider: CallsProviderName
 }
 
-export type SetupHealth = {
-  version: string
-  authMode: AuthMode
-  ok: boolean
-  ready: boolean
+export type SetupBindings = {
+  db: boolean
+  r2: boolean
+  kv: boolean
+  channelDo: boolean
+  serverDo: boolean
+  rateLimitDo: boolean
+  notificationDo: boolean
+  agentDo: boolean
+  workersAi: boolean
+  browser: boolean
+}
+
+/** Runtime details of `/api/setup/health`, returned only to signed-in members. */
+export type SetupHealthDetails = {
   users: number
-  migrated: boolean
-  adminEnv: boolean
-  ownerSetup: boolean
-  ownerEmailHint: string | null
-  bindings: {
-    db: boolean
-    r2: boolean
-    kv: boolean
-    channelDo: boolean
-    serverDo: boolean
-    rateLimitDo: boolean
-    notificationDo: boolean
-    agentDo: boolean
-    workersAi: boolean
-    browser: boolean
-  }
+  bindings: SetupBindings
   aiProvider: AiProviderName
   aiModel: string | null
   capabilities: RuntimeCapabilities
   realtimekit: boolean
   twitterAuth: boolean
+}
+
+/**
+ * `GET /api/setup/health`. Anyone may read the public part (the installer's
+ * deploy verification and the sign-in/setup pages need it). Before owner setup
+ * it also carries `users`, `adminEnv` and `bindings` so the setup page can
+ * explain a misconfigured deployment. Members additionally receive
+ * {@link SetupHealthDetails}.
+ */
+export type SetupHealth = {
+  version: string
+  authMode: AuthMode
+  ok: boolean
+  ready: boolean
+  migrated: boolean
+  ownerSetup: boolean
+  ownerEmailHint: string | null
+  adminEnv?: boolean
   appName: string
   iconUrl?: string | null
   appTitle: string
   appSubtitle: string
-}
+} & Partial<SetupHealthDetails>
 
 export type ClientMsg =
   | { t: 'auth'; token: string }

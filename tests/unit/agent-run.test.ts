@@ -8,7 +8,7 @@ import { agentGateway } from '../../server/utils/agent-gateway'
 import { agentTools, executeRunTool } from '../../server/utils/agent-tools'
 import { saveAgentProvider } from '../../server/utils/agent-providers'
 import { writeServerSetting } from '../../shared/server-settings'
-import { Permission } from '../../shared/permissions'
+import { ALL_PERMISSIONS, Permission } from '../../shared/permissions'
 import type { L4Env } from '../../workers/env'
 
 const serverId = '00000000-0000-4000-8000-000000000001'
@@ -24,6 +24,7 @@ beforeEach(() => {
   db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   db.exec(INIT_SQL)
+  db.prepare('INSERT INTO server_settings(key,value,updated_at) VALUES(?,?,?)').run('agents.executionPolicy', JSON.stringify({ mode: 'review', maxSteps: 20, maxModelCalls: 20, maxToolCalls: 100, maxTokens: 64000 }), new Date().toISOString())
   db.exec(`INSERT INTO server_identity(singleton,id) VALUES(1,'${serverId}');
     INSERT INTO roles(id,key,name,permissions_bitmask,resource_access_json) VALUES
       ('owner-role','owner','Owner',0,'{}'),
@@ -65,6 +66,15 @@ describe('Pi run authorization', () => {
     const authorization = await runAuthorization(env, first)
     expect(authorization.principal.permissions & Permission.writeTasks).toBe(0)
     expect(authorization.principal.resourceAccess?.boards).toEqual(['board-allowed'])
+  })
+
+  it('admits no new Run in an archived channel and fences one already admitted', async () => {
+    const admitted = await createAgentRun(env, (await start())!, input())
+    db.exec("UPDATE channels SET archived_at='2026-10-24T00:00:00Z' WHERE id='public-chat'")
+    const archived = { statusCode: 409, data: { error: { code: 'channel_archived' } } }
+    await expect(createAgentRun(env, (await start())!, { ...input(), idempotencyKey: 'request-0002' })).rejects.toMatchObject(archived)
+    await expect(runAuthorization(env, admitted)).rejects.toMatchObject(archived)
+    expect(db.prepare('SELECT count(*) as count FROM agent_runs').get()).toMatchObject({ count: 1 })
   })
 
   it('rejects capability replay against another run and rejects tools before execution starts', async () => {
@@ -145,12 +155,12 @@ describe('Pi run authorization', () => {
   it('bounds cumulative selected schemas through the existing Run ledger', async () => {
     const run = await createAgentRun(env, (await start())!, input())
     const insert = db.prepare("INSERT INTO agent_run_tools(run_id,call_id,name,arguments_json,policy_json,status,result_json,created_at) VALUES(?,?,'get_tool_details','{}','{}','completed',?,'2026-10-21')")
-    for (let i = 0; i < 8; i++) insert.run(run.id, `loaded-${i}`, JSON.stringify({ tool: { name: `prior_${i}`, parameters: {} } }))
+    for (let i = 0; i < 24; i++) insert.run(run.id, `loaded-${i}`, JSON.stringify({ tool: { name: `prior_${i}`, parameters: {} } }))
     const tools = agentTools(env, await runAuthorization(env, run), () => {}, run)
     await expect(tools.call('get_tool_details', { name: 'list_tasks', purpose: 'One more tool' })).rejects.toMatchObject({ statusCode: 413 })
     // A prior large schema also prevents unbounded description/context growth.
     db.prepare("DELETE FROM agent_run_tools WHERE run_id=?").run(run.id)
-    insert.run(run.id, 'large', JSON.stringify({ tool: { name: 'prior_large', description: 'x'.repeat(32000), parameters: {} } }))
+    insert.run(run.id, 'large', JSON.stringify({ tool: { name: 'prior_large', description: 'x'.repeat(128000), parameters: {} } }))
     await expect(tools.call('get_tool_details', { name: 'list_tasks', purpose: 'One more tool' })).rejects.toMatchObject({ statusCode: 413 })
   })
 
@@ -164,6 +174,18 @@ describe('Pi run authorization', () => {
     expect(await tools.call('search_tools', { query: 'tasks records data documents' })).toMatchObject({ tools: [] })
     for (const name of ['list_tasks', 'list_tables', 'list_data', 'get_document', 'create_document']) {
       await expect(tools.call('get_tool_details', { name, purpose: 'Read resources' })).rejects.toMatchObject({ statusCode: 403 })
+      await expect(tools.call(name, {})).rejects.toMatchObject({ statusCode: 403 })
+    }
+  })
+
+  it('hides paused Data tools even from a fully permitted Agent', async () => {
+    db.exec(`UPDATE roles SET permissions_bitmask=${ALL_PERMISSIONS} WHERE id='agent-role'`)
+    const run = await createAgentRun(env, (await start())!, input())
+    const tools = agentTools(env, await runAuthorization(env, run), () => {}, run)
+    const names = (await tools.catalog()).map(tool => tool.name)
+    expect(names).toContain('list_tasks')
+    for (const name of ['list_tables', 'list_data', 'create_document']) {
+      expect(names).not.toContain(name)
       await expect(tools.call(name, {})).rejects.toMatchObject({ statusCode: 403 })
     }
   })

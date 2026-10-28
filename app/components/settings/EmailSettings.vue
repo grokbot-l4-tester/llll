@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SettingsEditor from './SettingsEditor.vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import type { MailSettingsDTO, MailboxPermission, MemberDTO } from '~~/shared/types'
 
@@ -37,9 +38,9 @@ const ownerId = computed(() => membersQ.data.value?.members.find(member => membe
 const { mine } = usePermissions(computed(() => membersQ.data.value?.members))
 const isOwner = computed(() => mine.value?.role.key === 'owner')
 const session = useSessionStore()
-const inboundUnavailable = computed(() => session.health?.capabilities.emailInbound === null)
+const inboundUnavailable = computed(() => session.health?.capabilities?.emailInbound === null)
 const outboundDescription = computed(() => {
-  const provider = session.health?.capabilities.emailProvider
+  const provider = session.health?.capabilities?.emailProvider
   const inbound = 'Mail from the internet does not arrive until you set INBOUND_EMAIL_SECRET, or a Postmark, Mailgun, or Amazon SES webhook secret.'
   if (provider === 'cloudflare-rest') return `${inbound} Outbound mail uses Cloudflare Email Sending. The sender domain must be onboarded for Email Sending.`
   if (provider === 'binding') return `${inbound} Outbound mail uses the email binding configured for this server.`
@@ -304,7 +305,7 @@ async function saveMailbox() {
       <LayoutSaveBar :dirty="dirty" :saving="saving" :disabled="!displayName.trim()" @save="saveMailbox" @reset="resetDraft" />
     </template>
 
-    <UModal v-model:open="createOpen" title="New mailbox">
+    <SettingsEditor v-model:open="createOpen" back="Email" title="New mailbox">
       <template #body>
         <div class="space-y-4">
           <UFormField label="Address">
@@ -320,7 +321,7 @@ async function saveMailbox() {
         <UButton color="neutral" variant="ghost" label="Cancel" @click="createOpen = false" />
         <UButton label="Create mailbox" :loading="creating" :disabled="!localPart.trim() || !domainId" @click="createMailbox" />
       </template>
-    </UModal>
+    </SettingsEditor>
 
     <UModal v-model:open="deleteOpen" title="Delete this mailbox?">
       <template #body>

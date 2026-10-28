@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { llllNitroPlugins, llllNodeAliases } from './nitro.runtime.mjs'
 import { communityRailIcons } from './packages/client-ui/icons'
+import { SERVER_PERMISSIONS_POLICY } from './shared/security-headers'
 
 const devPublicHost = process.env.LLLL_DEV_HOST?.trim() || ''
 const requestedClientMode = process.env.LLLL_CLIENT_MODE
@@ -17,9 +18,13 @@ const stackFrontend = process.env.LLLL_DEV_STACK === 'true' && process.env.NODE_
 const rawSqlPlugin = {
   name: 'llll-raw-sql',
   async load(id: string) {
-    if (!id.endsWith('.sql?raw')) return null
-    const sql = await readFile(id.slice(0, -4), 'utf8')
-    return `export default ${JSON.stringify(sql)}`
+    const computeAsset = /\/packages\/compute-node\/(?:src\/[a-z-]+\.mjs|Dockerfile\.workspace)\?raw$/u.test(id)
+    if (!id.endsWith('.sql?raw') && !computeAsset) return null
+    const source = await readFile(id.slice(0, -4), 'utf8')
+    // Nitro rewrites import.meta in generated JavaScript, including string
+    // literals. Encode source assets so the guest receives the exact bytes.
+    if (computeAsset) return `export default new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(Buffer.from(source).toString('base64'))}), c => c.charCodeAt(0)))`
+    return `export default ${JSON.stringify(source)}`
   },
 }
 
@@ -94,7 +99,9 @@ export default defineNuxtConfig({
         headers: {
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'strict-origin-when-cross-origin',
-          'Permissions-Policy': 'camera=(self), microphone=(self), display-capture=(self)',
+          // Also written to _headers for static assets; documents get the full
+          // set (CSP, HSTS) from server/middleware/00-security.ts.
+          'Permissions-Policy': SERVER_PERMISSIONS_POLICY,
         },
       },
     },

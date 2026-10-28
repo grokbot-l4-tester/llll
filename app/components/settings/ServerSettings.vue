@@ -1,7 +1,7 @@
 <script setup lang="ts">
+import SettingsEditor from './SettingsEditor.vue'
 import { publicIconPath } from '~~/shared/server-appearance'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import type { TableColumn } from '@nuxt/ui'
 import type { AuditEntryDTO, ChannelCategoryDTO, ChannelDTO, ChannelRoleOverrideDTO, ServerDTO, MemberDTO, RoleDTO } from '~~/shared/types'
 import type { UpdateStatusDTO } from '~~/shared/releases'
 import { channelPermissionMasks, channelPermissionMode, ChannelPermissionGrants, type ChannelPermissionGrantKey, type ChannelPermissionMode } from '~~/shared/channel-permissions'
@@ -20,6 +20,22 @@ const qc = useQueryClient()
 const { copy } = useClipboard()
 /** Exposed so `/server/:id/settings?section=…` can deep-link, and so the section survives reopening. */
 const section = defineModel<string>('section', { default: 'overview' })
+const channelTab = ref('channels')
+const createChannelOpen = ref(false)
+const channelCreating = ref(false)
+const newChannelName = ref('')
+const newChannelCategory = ref('uncategorized')
+const newChannelPrivate = ref(false)
+const newChannelMembers = ref<string[]>([])
+const channelSettingsId = ref<string | null>(null)
+const selectedMemberId = ref<string | null>(null)
+const selectedAudit = ref<AuditEntryDTO | null>(null)
+const localComputeOpen = ref(false)
+const computeNodes = ref<{ openCreate: () => void } | null>(null)
+const providerSettings = ref<{ openCreate: () => void } | null>(null)
+const rolesSettings = ref<{ createRole: () => void } | null>(null)
+const policiesSettings = ref<{ createPolicy: () => void } | null>(null)
+const rolesListVisible = ref(true)
 
 const saving = ref(false)
 const memberChannelId = ref<string | null>(null)
@@ -69,6 +85,11 @@ const auditQ = useQuery({
   enabled: computed(() => Boolean(props.serverId) && open.value && section.value === 'audit'),
 })
 const isOwner = computed(() => mine.value?.role.key === 'owner')
+const overviewQ = useQuery({
+  queryKey: computed(() => ['server-overview', props.serverId]),
+  queryFn: () => api<{ totals: Record<string, number> }>(`/api/servers/${props.serverId}/overview`),
+  enabled: computed(() => open.value && section.value === 'overview' && isOwner.value),
+})
 const updatesQ = useQuery({
   queryKey: computed(() => ['updates', props.serverId]),
   queryFn: () => api<UpdateStatusDTO>(`/api/servers/${props.serverId}/updates`),
@@ -79,24 +100,29 @@ const updatesQ = useQuery({
 
 const serverNav = computed(() => [
   ...(can(Permission.manageServer) ? [{ id: 'overview' as const, label: 'Overview', icon: 'i-ph-house', keywords: ['name', 'icon', 'rename'] }] : []),
-  ...(can(Permission.manageChannels) ? [{ id: 'channels' as const, label: 'Channels', icon: 'i-ph-hash', keywords: ['categories', 'private'] }] : []),
-  ...(can(Permission.manageRoles) ? [{ id: 'roles' as const, label: 'Roles', icon: 'i-ph-shield', keywords: ['permissions', 'admin', 'access'] }] : []),
   ...(can(Permission.manageRoles) || can(Permission.kick) ? [{ id: 'members' as const, label: 'Members', icon: 'i-ph-users', keywords: ['people', 'kick', 'assign role'] }] : []),
   ...(can(Permission.invite) && session.health?.authMode !== 'access' ? [{ id: 'invites' as const, label: 'Invites', icon: 'i-ph-user-plus', keywords: ['invite link', 'join', 'share'] }] : []),
+  ...(can(Permission.manageRoles) ? [{ id: 'roles' as const, label: 'Roles & Policies', icon: 'i-ph-shield', aliases: ['roles', 'project-policies'], keywords: ['permissions', 'admin', 'access', 'projects', 'developer', 'reviewer'] }] : []),
 ])
-const featureNav = computed(() => [
-  ...(can(Permission.useAgents) || can(Permission.manageAgents) || can(Permission.useExternalTools) ? [{ id: 'tools' as const, label: 'Tools', icon: 'i-ph-wrench', keywords: ['mcp', 'connections', 'capabilities', 'permissions', 'approvals'] }] : []),
-  ...(can(Permission.manageServer) ? [{ id: 'environments' as const, label: 'Repositories', icon: 'i-ph-git-branch', keywords: ['agents', 'code', 'github', 'fork'] }] : []),
-  ...(can(Permission.manageAgents) ? [{ id: 'agents' as const, label: 'Agents', icon: 'i-ph-robot', keywords: ['bots', 'automation', 'tasks'] }] : []),
-  ...(isOwner.value ? [{ id: 'storage' as const, label: 'Storage', icon: 'i-ph-hard-drives', keywords: ['files', 'kv', 'r2', 'quota'] }] : []),
+const communicationNav = computed(() => [
+  ...(can(Permission.manageChannels) ? [{ id: 'channels' as const, label: 'Channels', icon: 'i-ph-hash', keywords: ['categories', 'private'] }] : []),
+  ...(can(Permission.manageServer) ? [{ id: 'email' as const, label: 'Mail', icon: 'i-ph-envelope-simple', keywords: ['email', 'mailbox', 'inbox', 'domain'] }] : []),
   ...(isOwner.value ? [{ id: 'live' as const, label: 'Live', icon: 'i-ph-waveform', keywords: ['calls', 'video', 'audio', 'screen share', 'realtimekit'] }] : []),
-  ...(can(Permission.manageServer) ? [{ id: 'email' as const, label: 'Email', icon: 'i-ph-envelope-simple', keywords: ['mail', 'mailbox', 'inbox', 'domain'] }] : []),
+])
+// The path to an agent that opens pull requests, in setup order.
+const agentNav = computed(() => [
+  ...(can(Permission.manageAgents) ? [{ id: 'agents' as const, label: 'Agents', icon: 'i-ph-robot', keywords: ['bots', 'automation', 'tasks', 'execution', 'limits', 'audit'] }] : []),
+  ...(isOwner.value ? [{ id: 'models' as const, label: 'Models', icon: 'i-ph-plugs-connected', aliases: ['models', 'model-defaults'], keywords: ['providers', 'openrouter', 'anthropic', 'claude', 'chatgpt', 'api key', 'default model'] }] : []),
+  ...(can(Permission.manageServer) ? [{ id: 'environments' as const, label: 'Repositories', icon: 'i-ph-git-branch', keywords: ['agents', 'code', 'github', 'fork'] }] : []),
+  ...(can(Permission.manageServer) ? [{ id: 'compute' as const, label: 'Compute', icon: 'i-ph-cpu', keywords: ['nodes', 'lizard', 'execution', 'containers', 'vps'] }] : []),
+  ...(can(Permission.useAgents) || can(Permission.manageAgents) || can(Permission.useExternalTools) ? [{ id: 'tools' as const, label: 'Tools', icon: 'i-ph-wrench', keywords: ['mcp', 'connections', 'capabilities', 'permissions', 'approvals'] }] : []),
 ])
 const accessNav = computed(() => [
   ...(isOwner.value ? [{ id: 'authentication' as const, label: 'Authentication', icon: 'i-ph-key', keywords: ['login', 'signup', 'oauth', 'github', 'sso', 'registration'] }] : []),
   ...(isOwner.value ? [{ id: 'onboarding' as const, label: 'Onboarding', icon: 'i-ph-flag-banner', keywords: ['welcome', 'first run', 'branding'] }] : []),
   ...(can(Permission.manageServer) ? [{ id: 'audit' as const, label: 'Audit Log', icon: 'i-ph-list-magnifying-glass', keywords: ['history', 'activity', 'log'] }] : []),
 ])
+const storageNav = computed(() => isOwner.value ? [{ id: 'storage' as const, label: 'Storage', icon: 'i-ph-database', keywords: ['files', 'kv', 'r2', 'quota'] }] : [])
 const deploymentSections = ['cloudflare', 'domains', 'backups', 'updates', 'danger']
 const deploymentNav = computed(() => isOwner.value
   ? [{
@@ -116,9 +142,10 @@ const deploymentNav = computed(() => isOwner.value
   : [])
 const groups = computed(() => [
   { label: 'Server', items: serverNav.value },
-  { label: 'Features', items: featureNav.value },
+  { label: 'Agents & code', items: agentNav.value },
+  { label: 'Communication', items: communicationNav.value },
   { label: 'Access', items: accessNav.value },
-  { items: deploymentNav.value },
+  { label: 'Hosting', items: [...storageNav.value, ...deploymentNav.value] },
 ].filter(group => group.items.length))
 const availableSections = computed(() => groups.value.flatMap(group => group.items.flatMap(item => 'aliases' in item ? item.aliases : [item.id])))
 
@@ -149,10 +176,15 @@ const moveCategoryId = ref('uncategorized')
 const movingChannel = computed(() => serverChannels.value.find(channel => channel.id === moveChannelId.value) ?? null)
 const categoryDeleteId = ref<string | null>(null)
 const channelAssigningId = ref<string | null>(null)
+const visibilityChannelId = ref<string | null>(null)
+const visibilitySaving = ref(false)
+const visibilityChannel = computed(() => serverChannels.value.find(channel => channel.id === visibilityChannelId.value) ?? null)
 
 const roles = computed(() => rolesQ.data.value?.roles ?? [])
 const categories = computed(() => channelsQ.data.value?.categories ?? [])
 const serverChannels = computed(() => (channelsQ.data.value?.channels ?? []).filter(channel => channel.type !== 'dm' && channel.type !== 'thread'))
+const channelSettings = computed(() => serverChannels.value.find(channel => channel.id === channelSettingsId.value))
+const selectedMember = computed(() => membersQ.data.value?.members.find(member => member.user.id === selectedMemberId.value))
 const selectedCategory = computed(() => categories.value.find(category => category.id === selectedCategoryId.value) ?? null)
 const categoryOptions = computed(() => [
   { label: 'Uncategorized', value: 'uncategorized' },
@@ -173,6 +205,17 @@ const overrideModeOptions = [
   { label: 'Allow', value: 'allow' },
   { label: 'Deny', value: 'deny' },
 ]
+async function createChannel() {
+  const name = newChannelName.value.trim().toLowerCase().replace(/\s+/g, '-')
+  if (!name || channelCreating.value) return
+  channelCreating.value = true
+  try {
+    await api(`/api/servers/${props.serverId}/channels`, { method: 'POST', body: { name, visibility: newChannelPrivate.value ? 'private' : 'server', categoryId: newChannelCategory.value === 'uncategorized' ? null : newChannelCategory.value, ...(newChannelPrivate.value ? { memberIds: newChannelMembers.value } : {}) } })
+    await qc.invalidateQueries({ queryKey: ['channels', props.serverId] })
+    createChannelOpen.value = false; newChannelName.value = ''; newChannelPrivate.value = false; newChannelMembers.value = []; newChannelCategory.value = 'uncategorized'
+  } catch (error) { toast.add({ title: errorMessage(error), color: 'error' }) }
+  finally { channelCreating.value = false }
+}
 
 watch([categories, section], ([list, activeSection]) => {
   if (activeSection !== 'channels') return
@@ -236,7 +279,7 @@ async function onSave(name: string) {
 }
 
 async function uploadServerIcon(event: Event) {
-  if ((session.health?.bindings.r2 === false && !session.health?.bindings.kv)) return
+  if ((session.health?.bindings?.r2 === false && !session.health?.bindings?.kv)) return
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
@@ -338,13 +381,10 @@ async function confirmDeleteCategory() {
   }
 }
 
-async function assignChannelCategory(channelId: string, categoryId: string) {
+async function moveChannel(channelId: string, categoryId: string | null, beforeId: string | null) {
   channelAssigningId.value = channelId
   try {
-    await api(`/api/channels/${channelId}`, {
-      method: 'PATCH',
-      body: { categoryId: categoryId === 'uncategorized' ? null : categoryId },
-    })
+    await api(`/api/channels/${channelId}/position`, { method: 'PUT', body: { categoryId, beforeId } })
     await qc.invalidateQueries({ queryKey: ['channels', props.serverId] })
     moveChannelId.value = null
   }
@@ -353,6 +393,74 @@ async function assignChannelCategory(channelId: string, categoryId: string) {
   }
   finally {
     channelAssigningId.value = null
+  }
+}
+
+/** Moving to another category places the channel last there. */
+function assignChannelCategory(channelId: string, categoryId: string) {
+  return moveChannel(channelId, categoryId === 'uncategorized' ? null : categoryId, null)
+}
+
+function channelSiblings(channel: ChannelDTO) {
+  return serverChannels.value.filter(other => (other.categoryId ?? null) === (channel.categoryId ?? null))
+}
+
+function shiftChannel(channel: ChannelDTO, step: -1 | 1) {
+  const siblings = channelSiblings(channel)
+  const index = siblings.findIndex(other => other.id === channel.id)
+  if (index < 0 || !siblings[index + step]) return
+  // Moving down places the channel before the one after its next sibling.
+  const before = step < 0 ? siblings[index - 1]! : siblings[index + 2] ?? null
+  void moveChannel(channel.id, channel.categoryId ?? null, before?.id ?? null)
+}
+
+const archiveChannelId = ref<string | null>(null)
+const archivingChannel = ref(false)
+const archiveCandidate = computed(() => serverChannels.value.find(channel => channel.id === archiveChannelId.value) ?? null)
+/** Archiving follows the visibility rule: a private channel only by its creator. The last channel stays. */
+function canArchive(channel: ChannelDTO) {
+  return serverChannels.value.length > 1 && (channel.visibility !== 'private' || channel.createdBy === session.user?.id)
+}
+async function confirmArchiveChannel() {
+  const channel = archiveCandidate.value
+  if (!channel || archivingChannel.value) return
+  archivingChannel.value = true
+  try {
+    await api(`/api/channels/${channel.id}/archive`, { method: 'PUT' })
+    archiveChannelId.value = null
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['channels', props.serverId] }),
+      qc.invalidateQueries({ queryKey: ['archived-channels', props.serverId] }),
+      qc.invalidateQueries({ queryKey: ['channel', channel.id] }),
+    ])
+    toast.add({ title: `#${channel.name} archived`, color: 'success' })
+  }
+  catch (error) { toast.add({ title: errorMessage(error), color: 'error' }) }
+  finally { archivingChannel.value = false }
+}
+
+function canChangeVisibility(channel: ChannelDTO) {
+  return channel.createdBy ? channel.createdBy === session.user?.id : channel.visibility === 'server'
+}
+
+async function confirmVisibilityChange() {
+  const channel = visibilityChannel.value
+  if (!channel) return
+  const visibility = channel.visibility === 'private' ? 'server' : 'private'
+  visibilitySaving.value = true
+  try {
+    await api(`/api/channels/${channel.id}`, { method: 'PATCH', body: { visibility } })
+    await qc.invalidateQueries({ queryKey: ['channels', props.serverId] })
+    visibilityChannelId.value = null
+    toast.add({ title: visibility === 'private' ? 'Channel is now private' : 'Channel is now open to the Server', color: 'success' })
+    // A channel made private starts with only its creator; choose who else belongs.
+    if (visibility === 'private') memberChannelId.value = channel.id
+  }
+  catch (err) {
+    toast.add({ title: errorMessage(err), color: 'error' })
+  }
+  finally {
+    visibilitySaving.value = false
   }
 }
 
@@ -450,13 +558,6 @@ async function assignRole(userId: string, roleId: string) {
   }
 }
 
-const columns: TableColumn<AuditEntryDTO>[] = [
-  { accessorKey: 'createdAt', header: 'When', cell: ({ row }) => formatDateTime(row.original.createdAt) },
-  { accessorKey: 'actorName', header: 'Actor' },
-  { accessorKey: 'action', header: 'Action' },
-  { accessorKey: 'targetType', header: 'Target', cell: ({ row }) => `${row.original.targetType} ${row.original.targetId.slice(0, 8)}` },
-]
-
 function roleLabel(name: string) {
   if (name === 'owner') return 'Owner'
   if (name === 'admin') return 'Admin'
@@ -467,7 +568,7 @@ function roleLabel(name: string) {
 </script>
 
 <template>
-  <SettingsOverlay v-model:open="open" v-model:section="section" :groups="groups" :title="serverName" :loading="membersQ.isPending.value">
+  <SettingsOverlay v-model:open="open" v-model:section="section" :groups="groups" :title="serverName" :loading="membersQ.isPending.value" editor-pages>
     <template v-if="section === 'overview'">
       <h1 class="text-xl font-semibold text-highlighted">Server Overview</h1>
       <div class="mt-8 flex flex-col items-start gap-6 sm:flex-row">
@@ -486,7 +587,7 @@ function roleLabel(name: string) {
               color="neutral"
               variant="soft"
               label="Change icon"
-              :disabled="(session.health?.bindings.r2 === false && !session.health?.bindings.kv)"
+              :disabled="(session.health?.bindings?.r2 === false && !session.health?.bindings?.kv)"
               :loading="serverIconBusy"
               @click="serverIconInput?.click()"
             />
@@ -505,62 +606,53 @@ function roleLabel(name: string) {
         </div>
         <SettingsServerOverviewForm v-if="serverQ.data.value" :name="serverQ.data.value.server.name" :saving="saving" :editable="can(Permission.manageServer)" @save="onSave" />
       </div>
-      <div class="mt-10 grid grid-cols-2 gap-4 max-w-md">
-        <div class="rounded-lg bg-elevated p-4">
-          <p class="text-[11px] font-bold uppercase tracking-wide text-muted">Members</p>
-          <USkeleton v-if="membersQ.isPending.value" class="mt-2 h-7 w-10" />
-          <p v-else class="text-2xl font-semibold text-highlighted mt-1">{{ memberCount }}</p>
-        </div>
-        <div class="rounded-lg bg-elevated p-4">
-          <p class="text-[11px] font-bold uppercase tracking-wide text-muted">Channels</p>
-          <USkeleton v-if="channelsQ.isPending.value" class="mt-2 h-7 w-10" />
-          <p v-else class="text-2xl font-semibold text-highlighted mt-1">{{ channelCount }}</p>
+      <LayoutLoadError v-if="isOwner && overviewQ.error.value" class="mt-10" message="Server totals did not load." :retry="overviewQ.refetch" />
+      <div v-else class="mt-10 grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <div v-for="metric in (isOwner ? ['people', 'agents', 'channels', 'projects', 'tasks', 'mailboxes'] : ['members', 'channels'])" :key="metric" class="rounded-lg bg-elevated p-4">
+          <p class="text-[11px] font-bold uppercase tracking-wide text-muted">{{ metric }}</p>
+          <USkeleton v-if="isOwner ? overviewQ.isPending.value : membersQ.isPending.value || channelsQ.isPending.value" class="mt-2 h-7 w-10" />
+          <p v-else class="text-2xl font-semibold text-highlighted mt-1">{{ isOwner ? overviewQ.data.value?.totals?.[metric] : metric === 'members' ? memberCount : channelCount }}</p>
         </div>
       </div>
     </template>
 
     <template v-else-if="section === 'channels'">
       <div class="flex items-center justify-between gap-3">
-        <h1 class="text-xl font-semibold text-highlighted">Channel categories</h1>
+        <h1 class="text-xl font-semibold text-highlighted">Channels</h1>
+        <UButton v-if="can(Permission.manageChannels) && channelTab === 'channels'" icon="i-ph-plus" label="Create channel" size="sm" @click="createChannelOpen = true" />
         <UButton
-          v-if="can(Permission.manageChannels)"
+          v-if="can(Permission.manageChannels) && channelTab === 'categories'"
           icon="i-ph-plus"
           label="Add category"
           size="sm"
           @click="createCategoryOpen = true"
         />
       </div>
-      <ul class="mt-6 divide-y divide-default">
-        <li v-for="category in categories" :key="category.id">
-          <button type="button" class="flex min-h-14 w-full items-center gap-3 rounded-lg px-3 py-3 text-start hover:bg-elevated focus-visible:outline-2 focus-visible:outline-primary" :aria-label="`Edit category ${category.name}`" @click="selectedCategoryId = category.id; categoryName = category.name; editCategoryOpen = true">
-            <UIcon name="i-ph-folder" class="size-5 text-muted" />
-            <span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-highlighted">{{ category.name }}</span><span class="text-xs text-muted">{{ serverChannels.filter(channel => channel.categoryId === category.id).length }} channels</span></span>
-            <UIcon name="i-ph-pencil-simple" class="size-4 text-muted" />
-          </button>
-        </li>
-        <li v-if="!categories.length" class="py-4 text-sm text-muted">No categories yet.</li>
-      </ul>
-      <h2 class="mt-10 text-sm font-semibold text-highlighted">Channels</h2>
-      <ul class="mt-2 divide-y divide-default">
-        <li v-for="channel in serverChannels" :key="channel.id" class="flex items-center gap-3 py-3">
-          <UIcon name="i-ph-hash" class="size-5 shrink-0 text-muted" />
-          <span class="min-w-0 flex-1 truncate text-sm text-highlighted">{{ channel.name }}</span>
-          <UButton
-            v-if="can(Permission.manageChannels)"
-            icon="i-ph-shield-check"
-            label="Permissions"
-            color="neutral"
-            variant="ghost"
-            size="xs"
-            @click="editChannelPermissions(channel.id)"
-          />
-          <UButton v-if="channel.visibility === 'private' && channel.createdBy === session.user?.id" icon="i-ph-users" label="Members" color="neutral" variant="ghost" size="xs" :aria-label="`Manage members of ${channel.name}`" @click="memberChannelId = channel.id" />
-          <UButton icon="i-ph-folder" label="Move" color="neutral" variant="ghost" size="sm" :aria-label="`Move ${channel.name} to a category`" @click="moveChannelId = channel.id; moveCategoryId = channel.categoryId || 'uncategorized'" />
-        </li>
-      </ul>
+      <SettingsEditor v-model:open="createChannelOpen" back="Channels" title="Create channel"><template #body><form class="space-y-4" @submit.prevent="createChannel"><UFormField label="Channel name"><UInput v-model="newChannelName" autofocus class="w-full" /></UFormField><UFormField label="Category"><USelect v-model="newChannelCategory" :items="categoryOptions" class="w-full" /></UFormField><UCheckbox v-model="newChannelPrivate" label="Private channel" /><UFormField v-if="newChannelPrivate" label="Members"><USelectMenu v-model="newChannelMembers" :items="(membersQ.data.value?.members ?? []).map(m => ({ label: m.nickname || m.user.displayName, value: m.user.id }))" value-key="value" multiple class="w-full" /></UFormField><div class="flex justify-end gap-2"><UButton label="Cancel" color="neutral" variant="outline" @click="createChannelOpen = false" /><UButton type="submit" label="Create channel" :loading="channelCreating" :disabled="!newChannelName.trim()" /></div></form></template></SettingsEditor>
+      <LayoutSegmentedTabs v-model="channelTab" :items="[{ value: 'channels', label: 'Channels' }, { value: 'categories', label: 'Categories' }, { value: 'archived', label: 'Archived' }, ...(isOwner ? [{ value: 'recovery', label: 'Recovery' }] : [])]" label="Channel settings" class="mt-5" />
+      <SettingsList v-if="channelTab === 'categories'" class="mt-6" :items="categories" :item-key="category => category.id" :search-text="category => category.name" placeholder="Search categories" :noun="['category', 'categories']" @select="category => { selectedCategoryId = category.id; categoryName = category.name; editCategoryOpen = true }">
+        <template #row="{ item: category }">
+          <span class="flex size-8 shrink-0 items-center justify-center rounded-md bg-elevated text-muted"><UIcon name="i-ph-folder" class="size-4" /></span>
+          <span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-highlighted">{{ category.name }}</span><span class="text-xs text-muted">{{ serverChannels.filter(channel => channel.categoryId === category.id).length }} channels</span></span>
+        </template>
+        <template #empty><p class="py-4 text-sm text-muted">No categories yet.</p></template>
+      </SettingsList>
+      <SettingsList v-else-if="channelTab === 'channels'" class="mt-6" :items="serverChannels" :item-key="channel => channel.id" :search-text="channel => channel.name" placeholder="Search channels" :noun="['channel', 'channels']" @select="channelSettingsId = $event.id">
+        <template #row="{ item: channel }"><span class="flex size-8 shrink-0 items-center justify-center rounded-md bg-elevated text-muted"><UIcon name="i-ph-hash" class="size-4" /></span><span class="min-w-0 flex-1 truncate text-sm font-medium text-highlighted">{{ channel.name }}</span></template>
+      </SettingsList>
+      <SettingsArchivedChannels v-else-if="channelTab === 'archived'" :server-id="serverId" class="mt-6" />
+      <SettingsChannelCreatorRecovery v-else-if="isOwner && channelTab === 'recovery'" :server-id="serverId" class="mt-6" />
+      <SettingsEditor back="Channels" :open="Boolean(channelSettings)" :title="channelSettings?.name || 'Channel'" @update:open="value => { if (!value) channelSettingsId = null }"><template #body><div v-if="channelSettings" class="flex flex-wrap gap-2">
+        <UButton v-if="can(Permission.manageChannels)" icon="i-ph-shield-check" label="Permissions" color="neutral" variant="outline" @click="editChannelPermissions(channelSettings!.id); channelSettingsId = null" />
+        <UButton v-if="channelSettings.visibility === 'private' && channelSettings.createdBy === session.user?.id" icon="i-ph-users" label="Members" color="neutral" variant="outline" @click="memberChannelId = channelSettings!.id; channelSettingsId = null" />
+        <UButton icon="i-ph-folder" label="Move to category" color="neutral" variant="outline" @click="moveChannelId = channelSettings!.id; moveCategoryId = channelSettings!.categoryId || 'uncategorized'; channelSettingsId = null" />
+        <UButton v-if="canChangeVisibility(channelSettings)" :icon="channelSettings.visibility === 'private' ? 'i-ph-lock-open' : 'i-ph-lock'" :label="channelSettings.visibility === 'private' ? 'Open to Server' : 'Make private'" color="neutral" variant="outline" @click="visibilityChannelId = channelSettings!.id; channelSettingsId = null" />
+        <UButton icon="i-ph-arrow-up" label="Move up" color="neutral" variant="outline" :disabled="channelSiblings(channelSettings)[0]?.id === channelSettings.id || Boolean(channelAssigningId)" @click="shiftChannel(channelSettings!, -1)" />
+        <UButton icon="i-ph-arrow-down" label="Move down" color="neutral" variant="outline" :disabled="channelSiblings(channelSettings).at(-1)?.id === channelSettings.id || Boolean(channelAssigningId)" @click="shiftChannel(channelSettings!, 1)" />
+        <UButton v-if="canArchive(channelSettings)" icon="i-ph-archive" label="Archive" color="neutral" variant="outline" @click="archiveChannelId = channelSettings!.id; channelSettingsId = null" />
+      </div></template></SettingsEditor>
       <SettingsPrivateChannelMembers v-if="memberChannel" :open="true" :server-id="serverId" :channel="memberChannel" @update:open="value => { if (!value) memberChannelId = null }" />
-      <SettingsChannelCreatorRecovery v-if="isOwner" :server-id="serverId" />
-      <UModal :open="Boolean(permissionChannel)" title="Channel permissions" @update:open="value => { if (!value) permissionChannelId = null }"><template #body><div v-if="permissionChannel">
+      <SettingsEditor back="Channels" :open="Boolean(permissionChannel)" title="Channel permissions" @update:open="value => { if (!value) permissionChannelId = null }"><template #body><div v-if="permissionChannel">
         <div class="flex items-center gap-3">
           <h2 class="min-w-0 flex-1 truncate text-sm font-semibold text-highlighted">
             {{ permissionChannel.name }} permissions
@@ -610,79 +702,73 @@ function roleLabel(name: string) {
           />
           <UButton label="Save" :loading="permissionSaving" @click="saveChannelPermissions" />
         </div>
-      </div></template></UModal>
+      </div></template></SettingsEditor>
     </template>
 
     <template v-else-if="section === 'tools'">
       <SettingsToolsSettings :server-id="serverId" @roles="section = 'roles'" />
     </template>
 
-    <template v-else-if="section === 'roles'">
-      <SettingsRolesSettings :server-id="serverId" />
+    <template v-else-if="section === 'roles' || section === 'project-policies'">
+      <SettingsHeader v-if="rolesListVisible || section === 'project-policies'" title="Roles &amp; Policies">
+        <template #actions>
+          <UButton v-if="section === 'roles' && rolesListVisible" icon="i-ph-plus" label="Create role" size="sm" @click="rolesSettings?.createRole()" />
+          <UButton v-else-if="section === 'project-policies'" icon="i-ph-plus" label="Create policy" size="sm" @click="policiesSettings?.createPolicy()" />
+        </template>
+      </SettingsHeader>
+      <LayoutSegmentedTabs
+v-if="rolesListVisible || section === 'project-policies'"
+        :model-value="section"
+        :items="[{ value: 'roles', label: 'Roles' }, { value: 'project-policies', label: 'Policies' }]"
+        label="Roles and policies"
+        class="mt-5 mb-6"
+        @update:model-value="section = $event"
+      />
+      <SettingsRolesSettings v-if="section === 'roles'" ref="rolesSettings" :server-id="serverId" @list-visible="rolesListVisible = $event" />
+      <SettingsProjectPolicies v-else ref="policiesSettings" :server-id="serverId" :is-owner="isOwner" />
     </template>
 
     <template v-else-if="section === 'environments'">
       <SettingsCodeEnvironments :server-id="serverId" />
     </template>
 
+    <template v-else-if="section === 'compute'">
+      <SettingsHeader title="Compute"><template #actions><UButton label="Add compute" icon="i-ph-plus" @click="computeNodes?.openCreate()" /></template></SettingsHeader>
+      <SettingsComputeNodes ref="computeNodes" class="mt-6" @open-server="localComputeOpen = true" />
+      <SettingsEditor v-model:open="localComputeOpen" back="Compute" title="Server compute setup"><template #body><SettingsFactorySetup /></template></SettingsEditor>
+    </template>
+
     <template v-else-if="section === 'agents'">
-      <SettingsAgentSettings :server-id="serverId" :is-owner="isOwner" @navigate="open = false" />
+      <SettingsAgentSettings :server-id="serverId" :is-owner="isOwner" :can-manage-server="can(Permission.manageServer)" @navigate="open = false" @section="section = $event" />
+    </template>
+
+    <template v-else-if="section === 'models' || section === 'model-defaults'">
+      <SettingsHeader title="Models"><template #actions><UButton v-if="section === 'models'" icon="i-ph-plus" label="Add provider" @click="providerSettings?.openCreate()" /></template></SettingsHeader>
+      <LayoutSegmentedTabs :model-value="section" :items="[{ value: 'models', label: 'Providers' }, { value: 'model-defaults', label: 'Defaults' }]" label="Model settings" class="mt-5 mb-6" @update:model-value="section = $event" />
+      <SettingsAgentProviderSettings ref="providerSettings" :server-id="serverId" :is-owner="isOwner" :view="section === 'model-defaults' ? 'defaults' : 'providers'" />
     </template>
 
     <template v-else-if="section === 'members'">
       <h1 class="text-xl font-semibold text-highlighted">Members</h1>
       <p class="mt-1 text-sm text-muted">{{ memberCount }} {{ memberCount === 1 ? 'member' : 'members' }} in this server.</p>
-      <ul class="mt-6 divide-y divide-default">
-        <li v-for="m in membersQ.data.value?.members ?? []" :key="m.user.id" class="flex items-center gap-3 py-3">
-          <UserAvatar :user="m.user" size="sm" />
-          <div class="min-w-0 flex-1">
-            <p class="font-medium truncate">{{ m.nickname || m.user.displayName }}</p>
-            <p class="text-xs text-muted">{{ roleLabel(m.role.name) }}</p>
-          </div>
-          <USelect
-            v-if="can(Permission.manageRoles) && m.role.key !== 'owner'"
-            :model-value="m.role.id"
-            :items="roleOptions"
-            value-key="value"
-            label-key="label"
-            size="sm"
-            class="w-40"
-            :loading="assigningId === m.user.id"
-            aria-label="Assign role"
-            @update:model-value="assignRole(m.user.id, String($event))"
-          />
-          <UButton
-            v-if="can(Permission.kick) && m.role.name !== 'owner'"
-            size="xs"
-            color="error"
-            variant="ghost"
-            label="Kick"
-            @click="kickId = m.user.id"
-          />
-        </li>
-      </ul>
+      <SettingsList class="mt-6" :items="membersQ.data.value?.members ?? []" :item-key="m => m.user.id" :search-text="m => `${m.nickname || m.user.displayName} ${m.role.name}`" :loading="membersQ.isPending.value" placeholder="Search members" :noun="['member', 'members']" @select="selectedMemberId = $event.user.id">
+        <template #row="{ item: m }"><UserAvatar :user="m.user" size="sm" /><span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-highlighted">{{ m.nickname || m.user.displayName }}</span><span class="block text-xs text-muted">{{ roleLabel(m.role.name) }}</span></span></template>
+      </SettingsList>
+      <SettingsEditor back="Members" :open="Boolean(selectedMember)" :title="selectedMember?.nickname || selectedMember?.user.displayName || 'Member'" @update:open="value => { if (!value) selectedMemberId = null }">
+        <template #body><div v-if="selectedMember" class="space-y-5">
+          <UFormField label="Server role"><USelect v-if="can(Permission.manageRoles) && selectedMember.role.key !== 'owner'" :model-value="selectedMember.role.id" :items="roleOptions" value-key="value" label-key="label" class="w-full" :loading="assigningId === selectedMember.user.id" aria-label="Assign role" @update:model-value="assignRole(selectedMember!.user.id, String($event))" /><p v-else class="text-sm text-muted">{{ roleLabel(selectedMember.role.name) }}</p></UFormField>
+          <UButton v-if="can(Permission.kick) && selectedMember.role.key !== 'owner'" color="error" variant="soft" label="Remove member" @click="kickId = selectedMember!.user.id" />
+        </div></template>
+      </SettingsEditor>
     </template>
 
     <template v-else-if="section === 'invites'">
-      <h1 class="text-xl font-semibold text-highlighted">Invites</h1>
-      <p class="mt-1 text-sm text-muted">Anyone with a link can join this server.</p>
-      <div class="mt-6 flex gap-2 max-w-xl">
-        <UInput :model-value="inviteUrl" readonly class="flex-1" placeholder="Create an invite to get a link" />
-        <UButton v-if="inviteUrl" label="Copy" @click="copyInvite()" />
-        <UButton v-if="can(Permission.invite)" :loading="inviting" label="Create Invite" @click="makeInvite" />
-      </div>
-      <ul v-if="invitesQ.data.value?.invites.length" class="mt-8 divide-y divide-default">
-        <li v-for="inv in invitesQ.data.value.invites" :key="inv.code" class="flex items-center gap-3 py-3">
-          <div class="min-w-0 flex-1">
-            <p class="font-mono text-sm text-highlighted truncate">{{ inv.code }}</p>
-            <p class="text-xs text-muted">
-              {{ inv.uses }}{{ inv.maxUses ? ` / ${inv.maxUses}` : '' }} uses
-              · {{ inv.expiresAt ? `expires ${formatDateTime(inv.expiresAt)}` : 'never expires' }}
-            </p>
-          </div>
-          <UButton size="xs" color="neutral" variant="soft" label="Copy" @click="copyInvite(inv.url)" />
-        </li>
-      </ul>
+      <SettingsHeader title="Invites"><template #actions><UButton v-if="can(Permission.invite)" :loading="inviting" icon="i-ph-plus" label="Create invite" @click="makeInvite" /></template></SettingsHeader>
+      <SettingsList class="mt-6" :items="invitesQ.data.value?.invites ?? []" :item-key="inv => inv.code" :search-text="inv => inv.code" :loading="invitesQ.isPending.value" placeholder="Search invites" :noun="['invite', 'invites']" @select="inviteUrl = $event.url">
+        <template #row="{ item: inv }"><span class="flex size-8 shrink-0 items-center justify-center rounded-md bg-elevated text-muted"><UIcon name="i-ph-link" class="size-4" /></span><span class="min-w-0 flex-1"><span class="block truncate font-mono text-sm text-highlighted">{{ inv.code }}</span><span class="block text-xs text-muted">{{ inv.uses }}{{ inv.maxUses ? ` / ${inv.maxUses}` : '' }} uses · {{ inv.expiresAt ? `expires ${formatDateTime(inv.expiresAt)}` : 'never expires' }}</span></span></template>
+        <template #empty><p class="text-sm text-muted">No invites yet.</p></template>
+      </SettingsList>
+      <SettingsEditor back="Invites" :open="Boolean(inviteUrl)" title="Invite link" @update:open="value => { if (!value) inviteUrl = '' }"><template #body><div class="flex gap-2"><UInput :model-value="serverUrl(inviteUrl)" readonly class="min-w-0 flex-1" /><UButton label="Copy" @click="copyInvite()" /></div></template></SettingsEditor>
     </template>
 
     <template v-else-if="section === 'storage'"><SettingsStorageSettings :server-id="serverId" /></template>
@@ -717,25 +803,28 @@ function roleLabel(name: string) {
       <LayoutSkeleton v-if="auditQ.isPending.value" variant="rows" :rows="6" class="mt-6" />
       <UAlert v-else-if="auditQ.error.value" color="error" title="Need manage permission." class="mt-6" />
       <UAlert v-else-if="!auditQ.data.value?.entries.length" color="neutral" title="Nothing yet." class="mt-6" />
-      <UTable v-else class="mt-6" :data="auditQ.data.value.entries" :columns="columns" />
+      <SettingsList v-else class="mt-6" :items="auditQ.data.value.entries" :item-key="entry => entry.id" :search-text="entry => `${entry.action} ${entry.actorName} ${entry.targetType}`" placeholder="Search audit log" :noun="['entry', 'entries']" @select="selectedAudit = $event"><template #row="{ item: entry }"><span class="flex size-8 shrink-0 items-center justify-center rounded-md bg-elevated text-muted"><UIcon name="i-ph-list-magnifying-glass" class="size-4" /></span><span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium">{{ entry.action }}</span><span class="block truncate text-xs text-muted">{{ entry.actorName }} · {{ formatDateTime(entry.createdAt) }}</span></span></template></SettingsList>
+      <SettingsEditor back="Audit Log" :open="Boolean(selectedAudit)" :title="selectedAudit?.action || 'Audit entry'" @update:open="value => { if (!value) selectedAudit = null }"><template #body><div v-if="selectedAudit" class="space-y-2 text-sm"><p>{{ selectedAudit.actorName }} · {{ formatDateTime(selectedAudit.createdAt) }}</p><p class="break-all text-muted">{{ selectedAudit.targetType }} · {{ selectedAudit.targetId }}</p><pre v-if="Object.keys(selectedAudit.meta ?? {}).length" class="overflow-auto rounded bg-elevated p-3 text-xs">{{ JSON.stringify(selectedAudit.meta, null, 2) }}</pre></div></template></SettingsEditor>
     </template>
-  </SettingsOverlay>
-
-  <UModal :open="Boolean(kickId)" title="Kick this member?" @update:open="(v: boolean) => { if (!v) kickId = null }">
-    <template #footer>
-      <UButton color="neutral" variant="outline" label="Cancel" @click="kickId = null" />
-      <UButton color="error" label="Kick" @click="confirmKick" />
-    </template>
-  </UModal>
-  <UModal v-model:open="editCategoryOpen" title="Edit category" :dismissible="!categorySaving">
+    <SettingsEditor v-model:open="editCategoryOpen" back="Channels" title="Edit category" :dismissible="!categorySaving">
     <template #body><UFormField label="Category name"><UInput v-model="categoryName" autofocus class="w-full" @keyup.enter="saveCategory" /></UFormField></template>
     <template #footer><UButton v-if="selectedCategory" color="error" variant="ghost" label="Delete category" @click="categoryDeleteId = selectedCategory.id; editCategoryOpen = false" /><UButton color="neutral" variant="ghost" label="Cancel" @click="editCategoryOpen = false" /><UButton label="Save changes" :loading="categorySaving" :disabled="!categoryName.trim()" @click="saveCategory" /></template>
-  </UModal>
-  <UModal :open="Boolean(movingChannel)" :title="`Move #${movingChannel?.name || 'channel'}`" @update:open="value => { if (!value) moveChannelId = null }">
+  </SettingsEditor>
+    <SettingsEditor back="Channels" :open="Boolean(visibilityChannel)" :title="visibilityChannel?.visibility === 'private' ? `Open #${visibilityChannel?.name} to the Server?` : `Make #${visibilityChannel?.name} private?`" @update:open="value => { if (!value) visibilityChannelId = null }">
+    <template #body>
+      <p class="text-sm text-muted">
+        {{ visibilityChannel?.visibility === 'private'
+          ? 'Every Server member will be able to read this channel, its Threads and its whole history.'
+          : 'Only you keep access until you add members. Everyone else loses this channel, its Threads and its history right away.' }}
+      </p>
+    </template>
+    <template #footer><UButton label="Cancel" color="neutral" variant="ghost" @click="visibilityChannelId = null" /><UButton :label="visibilityChannel?.visibility === 'private' ? 'Open channel' : 'Make private'" :color="visibilityChannel?.visibility === 'private' ? 'primary' : 'error'" :loading="visibilitySaving" @click="confirmVisibilityChange" /></template>
+  </SettingsEditor>
+    <SettingsEditor back="Channels" :open="Boolean(movingChannel)" :title="`Move #${movingChannel?.name || 'channel'}`" @update:open="value => { if (!value) moveChannelId = null }">
     <template #body><UFormField label="Category" description="Choose the group where this channel appears in Chat."><USelect v-model="moveCategoryId" :items="categoryOptions" class="w-full" /></UFormField></template>
     <template #footer><UButton label="Cancel" color="neutral" variant="ghost" @click="moveChannelId = null" /><UButton label="Move channel" :loading="Boolean(channelAssigningId)" @click="moveChannelId && assignChannelCategory(moveChannelId, moveCategoryId)" /></template>
-  </UModal>
-  <UModal v-model:open="createCategoryOpen" title="Add category">
+  </SettingsEditor>
+    <SettingsEditor v-model:open="createCategoryOpen" back="Channels" title="Add category">
     <template #body>
       <UFormField label="Category name">
         <UInput v-model="newCategoryName" class="w-full" autofocus @keyup.enter="createCategory" />
@@ -745,7 +834,32 @@ function roleLabel(name: string) {
       <UButton color="neutral" variant="outline" label="Cancel" @click="createCategoryOpen = false" />
       <UButton label="Add category" :loading="categoryCreating" :disabled="!newCategoryName.trim()" @click="createCategory" />
     </template>
+  </SettingsEditor>
+  </SettingsOverlay>
+
+  <UModal :open="Boolean(kickId)" title="Kick this member?" @update:open="(v: boolean) => { if (!v) kickId = null }">
+    <template #footer>
+      <UButton color="neutral" variant="outline" label="Cancel" @click="kickId = null" />
+      <UButton color="error" label="Kick" @click="confirmKick" />
+    </template>
   </UModal>
+
+
+
+  <UModal
+    :open="Boolean(archiveCandidate)"
+    :title="`Archive #${archiveCandidate?.name ?? 'channel'}?`"
+    @update:open="(value: boolean) => { if (!value && !archivingChannel) archiveChannelId = null }"
+  >
+    <template #body>
+      <p class="text-sm text-muted">It leaves Chat and the Inbox and becomes read-only for everyone, Threads included. Its history stays readable at its links and in search. Agent Runs working there are cancelled, its Live room ends, and Schedules that post there are blocked until it is restored. You can restore it from the Archived tab.</p>
+    </template>
+    <template #footer>
+      <UButton color="neutral" variant="outline" label="Cancel" :disabled="archivingChannel" @click="archiveChannelId = null" />
+      <UButton label="Archive channel" icon="i-ph-archive" :loading="archivingChannel" @click="confirmArchiveChannel" />
+    </template>
+  </UModal>
+
   <UModal
     :open="Boolean(categoryDeleteId)"
     title="Delete this category?"

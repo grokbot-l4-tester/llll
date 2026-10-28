@@ -45,7 +45,7 @@ sed -n "s/^LLLL_BIND='\\(.*\\)'/\\1/p" "$stage/.env"
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-it('creates a missing lock directory and names the failure when it cannot', () => {
+it.skipIf(process.platform !== 'linux')('creates a missing lock directory and names the failure when it cannot', () => {
   const directory = mkdtempSync(join(tmpdir(), 'llll-lock-'))
   const locks = join(directory, 'locks')
   const blocked = join(directory, 'not-a-directory')
@@ -149,7 +149,7 @@ project=factory-fixture
 version=${version}
 need() { :; }
 uname() { printf 'x86_64\\n'; }
-df() { printf 'Avail\\n12345678900\\n'; }
+df() { printf 'Avail\\n23456789000\\n'; }
 awk() { if [[ $1 == *MemAvailable:* ]]; then printf '4000000\\n'; else command awk "$@"; fi; }
 release_metadata() { base=${JSON.stringify(assets)}; }
 validate_metadata() { :; }

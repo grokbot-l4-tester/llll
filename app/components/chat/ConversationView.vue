@@ -77,11 +77,36 @@ const headerName = computed(() => {
   return channel.value?.title || dmTitle(channel.value?.name, channel.value?.participants ?? [], session.user?.id || '')
 })
 const frozen = computed(() => Boolean(oneQ.data.value?.frozen || channel.value?.frozen || ui.dmFrozen))
-const { can, mine } = usePermissions(members)
-const canPin = computed(() => isDm.value ? !frozen.value : can(Permission.manageChannels))
+const { can, canAnyProject, mine } = usePermissions(members)
+/** Writing Tasks anywhere offers Create task on messages; the board is chosen in the form. */
+const canCreateTasks = computed(() => canAnyProject(Permission.writeTasks))
+/** Archived history stays readable at its link; it takes no new messages, reactions, pins or Live rooms. */
+const archived = computed(() => !isDm.value && Boolean(channel.value?.archivedAt))
+/** Restoring follows the visibility rule: Manage channels, and for a private channel its creator. */
+const canRestore = computed(() => archived.value && can(Permission.manageChannels)
+  && (channel.value?.visibility !== 'private' || channel.value?.createdBy === session.user?.id))
+const restoring = ref(false)
+async function restoreChannel() {
+  if (restoring.value) return
+  restoring.value = true
+  try {
+    await api(`/api/channels/${channelId.value}/archive`, { method: 'DELETE' })
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['channel', channelId.value] }),
+      qc.invalidateQueries({ queryKey: ['channels', serverId.value] }),
+      qc.invalidateQueries({ queryKey: ['archived-channels', serverId.value] }),
+    ])
+    toast.add({ title: 'Channel restored', color: 'success' })
+  }
+  catch (error) {
+    toast.add({ title: errorMessage(error), color: 'error' })
+  }
+  finally { restoring.value = false }
+}
+const canPin = computed(() => isDm.value ? !frozen.value : can(Permission.manageChannels) && !archived.value)
 const effectivePermissions = computed(() => channel.value?.permissions ?? mine.value?.role.permissions ?? 0)
 const canSendMessages = computed(() => isDm.value ? !frozen.value : hasPermission(effectivePermissions.value, Permission.sendMessages))
-const canAttachFiles = computed(() => (session.health?.bindings.r2 !== false || session.health?.bindings.kv) && (isDm.value ? !frozen.value : hasPermission(effectivePermissions.value, Permission.attachFiles)))
+const canAttachFiles = computed(() => (session.health?.bindings?.r2 !== false || session.health?.bindings?.kv) && (isDm.value ? !frozen.value : hasPermission(effectivePermissions.value, Permission.attachFiles)))
 // Starting follows the role in Direct Messages too; anyone who can open the conversation can join.
 const canStartLive = computed(() => !frozen.value && hasPermission(effectivePermissions.value, Permission.startLive))
 const isConversation = computed(() => type.value !== 'thread')
@@ -91,6 +116,7 @@ const permissionsKnown = computed(() => Boolean(channel.value)
   && (isDm.value || channel.value?.permissions !== undefined || Boolean(mine.value)))
 const composerDisabledPlaceholder = computed(() => {
   if (!permissionsKnown.value) return composerPlaceholder.value
+  if (archived.value) return 'This channel is archived'
   return frozen.value
     ? 'You can no longer send messages to this user'
     : 'You cannot send messages in this channel'
@@ -129,26 +155,31 @@ const pairDm = computed(() => isDm.value)
 const roomActive = computed(() => Boolean(live.state?.active))
 const liveKind = computed(() => roomActive.value ? live.state!.kind : liveKindFor(pairDm.value))
 const liveActionLabel = computed(() => roomActive.value ? liveJoinLabel(liveKind.value) : liveStartLabel(liveKind.value))
-const callsUnavailable = computed(() => session.health?.capabilities.calls === false)
+const callsUnavailable = computed(() => session.health?.capabilities?.calls === false)
 const liveActionHint = computed(() => {
   if (callsUnavailable.value) return 'Calls use Cloudflare RealtimeKit and are unavailable on this runtime.'
   if (roomActive.value || canStartLive.value) return liveActionLabel.value
+  if (archived.value) return 'This channel is archived'
   return frozen.value ? 'You can no longer call in this Direct Message' : 'Your role cannot start live sessions here'
 })
-const joinedHere = computed(() => live.connection === 'connected' && live.currentChannelId === channelId.value)
+const joinedHere = computed(() => live.inRoom && live.currentChannelId === channelId.value)
 const showStage = computed(() => joinedHere.value && live.expanded)
 // Mirrors the server's host rule: the starter, or someone who manages this Channel.
+// Mirrors the server's moderation rule: Manage channels after channel overrides, never in DMs.
+const canModerate = computed(() => !isDm.value && hasPermission(effectivePermissions.value, Permission.manageChannels))
 const canEndLive = computed(() => Boolean(
   live.state?.active
   && (live.state.startedBy === session.user?.id
     || (!isDm.value && hasPermission(effectivePermissions.value, Permission.manageChannels))),
 ))
+// Hosts may also mute and remove people; both people in a 1:1 Call are hosts.
+const isLiveHost = computed(() => Boolean(live.state?.active && (live.state.kind === 'call' || canEndLive.value)))
 
 function openPrejoin() {
   live.error = null
   if (callsUnavailable.value) return
   // Say Live is not connected before asking for a camera and microphone.
-  if (session.health && !session.health.realtimekit) {
+  if (session.health?.realtimekit === false) {
     ui.liveSetupOpen = true
     return
   }
@@ -440,6 +471,7 @@ defineShortcuts({
       <LiveStage
         v-if="showStage"
         :can-end="canEndLive"
+        :can-moderate="isLiveHost"
         @leave="leave"
         @end="endLive"
       />
@@ -450,6 +482,9 @@ defineShortcuts({
         :channel-name="headerName"
         :is-dm="isDm"
         :can-pin="canPin"
+        :can-moderate="canModerate"
+        :can-create-tasks="canCreateTasks"
+        :read-only="archived"
         :link-path="channel ? channelPath(channel) : undefined"
         @reply="onReply"
         @thread="onThread"
@@ -457,6 +492,16 @@ defineShortcuts({
         @retry="retry"
       />
       <UAlert v-if="frozen" color="neutral" variant="subtle" title="You can no longer send messages to this user." class="rounded-none shrink-0" />
+      <UAlert
+        v-if="archived"
+        color="neutral"
+        variant="subtle"
+        icon="i-ph-archive"
+        title="This channel is archived"
+        description="Its history stays readable, but nothing new can be posted."
+        :actions="canRestore ? [{ label: 'Restore', color: 'neutral', variant: 'outline', loading: restoring, onClick: restoreChannel }] : []"
+        class="rounded-none shrink-0"
+      />
       <ChatAgentActivity
         :channel-id="channelId"
         :members="members"
@@ -509,6 +554,8 @@ defineShortcuts({
         :server-id="serverId"
         :members="members"
         :can-pin="canPin"
+        :can-moderate="canModerate"
+        :can-create-tasks="canCreateTasks"
       />
       <LayoutMemberRail
         v-else-if="(!detailsOverlay && ui.rightPanelOpen) || (detailsOverlay && ui.mobilePane === 'members')"

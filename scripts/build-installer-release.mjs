@@ -93,7 +93,7 @@ const manifest = {
   releasedAt: new Date().toISOString(),
   compatibilityDate: '2026-09-28',
   compatibilityFlags: ['nodejs_compat', 'global_fetch_strictly_public'],
-  capabilities: ['cloudflare-access-auth', 'optional-r2', 'basic-kv-storage-v1', 'server-mail-v1', 'llll-server-schema-v1', 'factory-unused-repair-v1'],
+  capabilities: ['cloudflare-access-auth', 'optional-r2', 'basic-kv-storage-v1', 'server-mail-v1', 'llll-server-schema-v2', 'factory-unused-repair-v1'],
   worker: {
     url: `${releaseBaseUrl}/${workerName}`,
     sha256: digest('sha256', worker),
@@ -111,6 +111,7 @@ const manifest = {
     { tag: 'v3-agent-schedules', new_sqlite_classes: ['AgentScheduleDurableObject'] },
     { tag: 'v4-retire-think', deleted_classes: ['L4Think'] },
     { tag: 'v5-factory-executor', new_sqlite_classes: ['FactoryComputeDurableObject'] },
+    { tag: 'v6-lizard-compute', new_sqlite_classes: ['LizardComputeDurableObject'] },
   ],
   durableObjects: [
     { binding: 'CHANNEL_DO', className: 'ChannelDurableObject', migration: 'v1' },
@@ -120,6 +121,7 @@ const manifest = {
     { binding: 'AGENT_DO', className: 'L4Agent', migration: 'v1' },
     { binding: 'AGENT_RUN_DO', className: 'AgentRunDurableObject', migration: 'v2-agent-runs' },
     { binding: 'AGENT_SCHEDULE_DO', className: 'AgentScheduleDurableObject', migration: 'v3-agent-schedules' },
+    { binding: 'LIZARD_COMPUTE_DO', className: 'LizardComputeDurableObject', migration: 'v6-lizard-compute' },
   ],
 
 }

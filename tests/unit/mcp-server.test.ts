@@ -1,12 +1,19 @@
-import { createMcpHandler } from 'agents/mcp/server'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { version as packageVersion } from '../../package.json'
 import { ALL_PERMISSIONS } from '../../shared/permissions'
 import { INIT_SQL } from '../../server/utils/db'
-import { createL4McpServer } from '../../server/utils/mcp-server'
+import { mcpOutput, serveMcpRequest } from '../../server/utils/mcp-server'
+import { toolPaused } from '../../shared/features'
 import type { L4Env } from '../../workers/env'
 import type { McpPrincipal } from '../../server/utils/mcp-principal'
+
+// Paused Data tools keep their tests; those cases resume the area for one test.
+vi.mock('../../shared/features', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../shared/features')>()
+  return { ...actual, toolPaused: vi.fn(actual.toolPaused) }
+})
+const resumePausedTools = () => vi.mocked(toolPaused).mockReturnValue(false)
 
 let sqlite: DatabaseSync
 
@@ -18,6 +25,7 @@ function d1(database: DatabaseSync): D1Database {
         bind(...next: SQLInputValue[]) { values = next; return statement },
         async first<T>() { return (database.prepare(sql).get(...values) as T | undefined) ?? null },
         async all<T>() { return { results: database.prepare(sql).all(...values) as T[] } },
+        async raw() { const query = database.prepare(sql); query.setReturnArrays(true); return query.all(...values) },
         async run() { return { success: true, meta: database.prepare(sql).run(...values) } },
       }
       return statement
@@ -37,7 +45,10 @@ beforeEach(() => {
   `)
 })
 
-afterEach(() => sqlite.close())
+afterEach(() => {
+  sqlite.close()
+  vi.mocked(toolPaused).mockReset()
+})
 
 function ownerPrincipal(): McpPrincipal {
   const authorization = {
@@ -60,11 +71,7 @@ function ownerPrincipal(): McpPrincipal {
 }
 
 function createHandler(principal = ownerPrincipal()) {
-  return createMcpHandler(() => createL4McpServer({
-    env: { DB: d1(sqlite) } as L4Env,
-    principal,
-    schedule: () => {},
-  }), { allowedHostnames: ['localhost'], allowedOriginHostnames: ['localhost'] })
+  return { fetch: (request: Request) => serveMcpRequest(request, { env: { DB: d1(sqlite) } as L4Env, principal, schedule: () => {} }) }
 }
 
 async function call(handler: ReturnType<typeof createHandler>, message: Record<string, unknown>) {
@@ -86,6 +93,17 @@ async function call(handler: ReturnType<typeof createHandler>, message: Record<s
 }
 
 describe('L4 MCP server', () => {
+  it('refuses requests from another site or a rebound host', async () => {
+    const request = (headers: Record<string, string>) => createHandler().fetch(new Request('https://localhost/mcp', {
+      method: 'POST',
+      headers: { Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    }))
+    expect((await request({ Host: 'localhost', Origin: 'https://evil.example' })).status).toBe(403)
+    expect((await request({ Host: 'evil.example' })).status).toBe(403)
+    expect((await request({ Host: 'localhost', Origin: 'https://localhost' })).status).toBe(200)
+  })
+
   it('reports the package version during MCP initialization', async () => {
     const { payload } = await call(createHandler(), {
       jsonrpc: '2.0',
@@ -101,25 +119,52 @@ describe('L4 MCP server', () => {
     expect(payload.result.serverInfo).toEqual({ name: 'L4', version: packageVersion })
   })
 
-  it('publishes focused Tasks and Documents tools over Streamable HTTP', async () => {
+  it('publishes focused Tasks and messaging tools over Streamable HTTP, without paused Data tools', async () => {
     const { response, payload } = await call(createHandler(), { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
 
     expect(response.status).toBe(200)
     expect(payload.result.tools?.map(tool => tool.name)).toEqual([
-      'list_tables', 'create_table', 'read_records', 'create_record', 'update_record',
       'list_task_boards',
       'get_task',
       'create_task',
       'update_task',
-      'list_documents',
-      'get_document',
-      'create_document',
-      'update_document',
       'list_channels',
       'list_members',
+      'list_roles',
       'list_messages',
       'send_message',
+      'search_messages',
+      'list_threads',
+      'edit_message',
+      'delete_message',
+      'react_message',
+      'pin_message',
+      'open_dm',
     ])
+  })
+
+  it('never returns storage object keys, only avatar URLs', async () => {
+    expect(mcpOutput({ members: [
+      { id: 'u1', kind: 'human', avatarR2Key: 'server/users/u1/avatar-1.webp' },
+      { id: 'u2', kind: 'human', avatarR2Key: 'https://provider.example/picture.png' },
+    ], server: { id: 's', iconR2Key: 'server/icon.webp' } }, 'https://chat.example')).toEqual({ members: [
+      { id: 'u1', kind: 'human', avatarUrl: 'https://chat.example/api/users/u1/avatar' },
+      { id: 'u2', kind: 'human', avatarUrl: null },
+    ], server: { id: 's' } })
+
+    sqlite.exec(`
+      UPDATE users SET avatar_r2_key='server/users/owner/avatar-1.webp' WHERE id='owner';
+      INSERT INTO channels(id,name,type,visibility) VALUES ('general-chat','General','text','server');
+      INSERT INTO messages(id,channel_id,author_id,content,created_at) VALUES ('m1','general-chat','owner','Hello','2026-10-22');
+    `)
+    const principal = ownerPrincipal()
+    principal.authorization.credential.scopes = ['messages:read']
+    principal.scopes = ['messages:read']
+    const { payload } = await call(createHandler(principal), { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_messages', arguments: { channelId: 'general-chat' } } })
+    const text = payload.result.content![0]!.text
+    expect(payload.result.isError, text).not.toBe(true)
+    expect(text).not.toContain('avatar-1.webp')
+    expect(JSON.parse(text).messages[0].author).toMatchObject({ id: 'owner', avatarUrl: '/api/users/owner/avatar' })
   })
 
   it('gets a task through MCP by its database-assigned number', async () => {
@@ -142,6 +187,7 @@ describe('L4 MCP server', () => {
   })
 
   it('creates a server document as an Agent and records its human delegator', async () => {
+    resumePausedTools()
     sqlite.exec(`
       INSERT INTO roles (id, key, name, permissions_bitmask) VALUES ('agent-role', 'agent', 'Agent', ${ALL_PERMISSIONS});
       INSERT INTO users (id, kind, display_name, status, role_id, joined_at)
@@ -187,6 +233,7 @@ describe('L4 MCP server', () => {
 
 
 it('discovers only authorized table schemas over MCP with the data:read scope', async () => {
+  resumePausedTools()
   sqlite.exec(`INSERT INTO database_definitions(id,name,created_by) VALUES('allowed','Visible table','owner'),('private','Private canary table','owner');
     INSERT INTO database_fields(id,database_id,name,type,slot,created_by) VALUES('field-allowed','allowed','Name','text','text_1','owner'),('field-private','private','Private canary field','text','text_1','owner');`)
   const principal = ownerPrincipal()

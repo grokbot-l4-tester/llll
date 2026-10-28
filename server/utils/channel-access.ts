@@ -1,5 +1,6 @@
 import { requireProject } from './project-service'
-import { authorizeResource } from '../../shared/authorization'
+import { loadProjectPolicies } from './project-policies'
+import { taskPermissionAllowed } from './task-policy'
 import { parseResourceAccess } from '../../shared/resource-access'
 import { getServerId } from '../../shared/server-id'
 import { and, eq, inArray } from 'drizzle-orm'
@@ -8,6 +9,8 @@ import { resolveChannelPermissions } from '../../shared/channel-permissions'
 import { ALL_PERMISSIONS, directMessagePermissions, hasPermission, Permission, type PermissionFlag } from '../../shared/permissions'
 import { mailPermissionAllows } from '../../shared/mail'
 import type { ChannelType, MailboxPermission, PublicUser } from '../../shared/types'
+import { dmFrozen } from '../../shared/dm'
+import { ARCHIVED_CHANNEL_WITHHELD, CHANNEL_ARCHIVED_CODE, CHANNEL_ARCHIVED_MESSAGE } from '../../shared/channel-archive'
 import type { AuthorizationContext } from '../../shared/authorization'
 import type { L4Env } from '../../workers/env'
 import { fail } from './cf'
@@ -29,9 +32,16 @@ export type ServerChannelAccess = ServerMembership & {
   channel: typeof channels.$inferSelect
   accessRootType: ChannelType
   frozen: boolean
+  /** When the channel, or a Thread's parent channel, was archived. */
+  archivedAt: string | null
   participants: PublicUser[]
   /** The member's grant when the channel is a mailbox or one of its conversations. */
   mailPermission: MailboxPermission | null
+}
+
+/** Writes that are not covered by a withheld channel grant (reactions, pins, settings) call this. */
+export function requireActiveChannel(access: Pick<ServerChannelAccess, 'archivedAt'>) {
+  if (access.archivedAt) fail(409, CHANNEL_ARCHIVED_CODE, CHANNEL_ARCHIVED_MESSAGE)
 }
 
 export async function requireMemberForUser(env: L4Env, user: PublicUser, serverId: string, flag?: PermissionFlag, source?: Pick<AuthorizationContext, 'credential' | 'delegation'>): Promise<ServerMembership> {
@@ -69,6 +79,7 @@ export async function requireMemberForUser(env: L4Env, user: PublicUser, serverI
       permissions: perms,
       isOwner,
       resourceAccess: parseResourceAccess(row.resourceAccessJson),
+      projectPolicies: await loadProjectPolicies(env, user.id, row.roleId!),
     },
     credential: source?.credential ?? { kind: 'session' },
     ...(source?.delegation ? { delegation: source.delegation } : {}),
@@ -130,24 +141,24 @@ export async function requireChannelAccessForMember(env: L4Env, member: ServerMe
   ])
   if (privateParts && !privateParts[0]) fail(404, 'not_found', 'Channel not found')
   // A task's discussion is part of the task: only people who can work with tasks may open it.
-  if (discussions[0] && !baseMember.isOwner && !hasPermission(baseMember.perms, Permission.readTasks)) {
+  if (discussions[0] && !taskPermissionAllowed(baseMember.authorization, discussions[0], Permission.readTasks)) {
     fail(404, 'not_found', 'Channel not found')
   }
 
   if (discussions[0]) {
-    authorizeResource(baseMember.authorization, 'boards', discussions[0].boardId)
     if (discussions[0].projectId) await requireProject(env, baseMember.authorization, discussions[0].projectId)
   }
 
   const mailbox = mailboxes[0]
   if (mailbox) {
     if (!mailbox.enabled) fail(404, 'not_found', 'Channel not found')
+    if (!baseMember.isOwner && !hasPermission(baseMember.perms, Permission.readMail)) fail(404, 'not_found', 'Channel not found')
     const grant = grants[0]
     if (!grant) fail(404, 'not_found', 'Channel not found')
     if (flag === Permission.manageChannels) fail(403, 'forbidden', 'Manage mailboxes in email settings')
     if (flag === Permission.startLive) fail(403, 'forbidden', 'Live sessions are unavailable for mailboxes')
     const mutationWithoutFlag = !['GET', 'HEAD'].includes(method) && flag === undefined
-    if ((mutationWithoutFlag || flag === Permission.sendMessages || flag === Permission.attachFiles) && !mailPermissionAllows(grant.permission, 'send')) {
+    if ((mutationWithoutFlag || flag === Permission.sendMessages || flag === Permission.attachFiles) && (!mailPermissionAllows(grant.permission, 'send') || (!baseMember.isOwner && !hasPermission(baseMember.perms, Permission.sendMail)))) {
       fail(403, 'forbidden', 'Mailbox is read only')
     }
   }
@@ -161,7 +172,7 @@ export async function requireChannelAccessForMember(env: L4Env, member: ServerMe
       fail(404, 'not_found', 'Channel not found')
     }
     const stillIn = new Set(userRows.filter(row => row.status === 'active').map(row => row.id))
-    const frozen = parts.some((p) => !stillIn.has(p.userId))
+    const frozen = dmFrozen(parts.length, parts.filter(p => stillIn.has(p.userId)).length)
     const perms = directMessagePermissions(baseMember.perms, baseMember.isOwner, frozen)
     if (flag === Permission.startLive && frozen) fail(403, 'forbidden', 'This direct message can no longer start calls')
     if (flag !== undefined && !frozen && !hasPermission(perms, flag) && flag !== Permission.sendMessages) {
@@ -179,6 +190,7 @@ export async function requireChannelAccessForMember(env: L4Env, member: ServerMe
       channel,
       accessRootType: rootType,
       frozen,
+      archivedAt: null,
       participants,
       mailPermission: null,
       authorization: { ...baseMember.authorization, principal: { ...baseMember.authorization.principal, permissions: perms } },
@@ -196,6 +208,15 @@ export async function requireChannelAccessForMember(env: L4Env, member: ServerMe
     )).limit(1))[0]
     perms = resolveChannelPermissions(perms, override)
   }
+  if (mailbox && mailPermissionAllows(grants[0]!.permission, 'send') && (baseMember.isOwner || hasPermission(baseMember.perms, Permission.sendMail))) {
+    perms |= Permission.sendMessages | Permission.attachFiles
+  }
+  // Archiving is checked before the role so every send, upload and Live start answers the same way.
+  const archivedAt = accessRoot.type === 'text' ? accessRoot.archivedAt ?? null : null
+  if (archivedAt) {
+    if (flag !== undefined && (flag & ARCHIVED_CHANNEL_WITHHELD)) fail(409, CHANNEL_ARCHIVED_CODE, CHANNEL_ARCHIVED_MESSAGE)
+    perms &= ~ARCHIVED_CHANNEL_WITHHELD
+  }
   if (flag !== undefined && !hasPermission(perms, flag)) {
     fail(403, 'forbidden', 'Missing permission')
   }
@@ -207,6 +228,7 @@ export async function requireChannelAccessForMember(env: L4Env, member: ServerMe
     channel,
     accessRootType: rootType,
     frozen: false,
+    archivedAt,
     participants: [],
     mailPermission: mailbox ? grants[0]!.permission : null,
   }

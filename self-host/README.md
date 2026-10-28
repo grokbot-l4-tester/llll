@@ -2,7 +2,7 @@
 
 The common Compose runs L4 on a single [celld](https://celld.dev) node, with private [RustFS](https://github.com/rustfs/rustfs) storage and a Caddy gateway. For convenient local development from the repository root, use `pnpm dev:stack`; see [local development](../docs/local-development.md). The [VPS installer](../docs/vps-installer.md) reuses this stack with a small public-HTTPS override; it first ships in `0.2.0-alpha.7`. The same deployment without Docker is [Self-host on celld](../docs/self-host/celld.md).
 
-celld 0.6.2 has no secrets store. On startup the container writes `self-host/.env` into a gitignored `wrangler.celld.local.json` and `celld deploy` stores that `vars` object in the bucket as plaintext. Keep the RustFS volume private. Do not publish port 9000.
+celld 0.6.3 has no secrets store. On startup the container writes `self-host/.env` into a gitignored `wrangler.celld.local.json` and `celld deploy` stores that `vars` object in the bucket as plaintext. Keep the RustFS volume private. Do not publish port 9000.
 
 The image build sets `NODE_OPTIONS=--max-old-space-size=6144`. Building needs a machine with about 8 GB of free RAM. A published image skips that build on the VPS.
 
@@ -101,6 +101,12 @@ docker compose exec llll \
 ```
 
 The database argument is the `database_name` (`llll` unless you set `DATABASE_NAME`). Concatenate the archive's `database/*.sql` files in order before importing. See [Manual server backups](../docs/deployment.md#manual-server-backups).
+
+## Troubleshooting
+
+- **`bucket-init` fails with "could not reach or create"** while RustFS is healthy: the host drops traffic between containers, typically legacy iptables with `-P FORWARD DROP`. Allow the Compose bridge, for example `iptables -I DOCKER-USER -i br-<id> -j ACCEPT`, and make the rule persistent.
+- **Hosts without systemd** (containers, some minimal images): start `dockerd` yourself and arrange for it to start after a reboot; Compose's `restart: unless-stopped` only applies once Docker is running.
+- **"waiting for the celld node to join"** on first start is expected: migrations apply as soon as the node registers.
 
 ## Coolify
 

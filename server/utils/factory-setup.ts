@@ -19,7 +19,7 @@ export async function factorySetup(env: L4Env, auth: AuthorizationContext) {
   return { placement, resources, usage, state: cloud ? cloud.enabled ? usage?.recoveryRequired ? 'failed_recovery' : 'ready' : 'paused' : resources ? 'disabled' : 'unavailable',
     nodeId: cloud?.id ?? null, image: env.FACTORY_IMAGE ?? limits?.image ?? null, limits,
     connectUrl: placement === 'cloudflare' && env.ACCOUNT_ID ? `https://llll.gg/create?tab=cloudflare&factory=1&account=${encodeURIComponent(env.ACCOUNT_ID)}&worker=${encodeURIComponent('llll-' + serverId)}&server=${encodeURIComponent(env.PUBLIC_ORIGIN ?? '')}` : null,
-    cli: placement === 'vps' ? 'sudo llll factory enable --trust-shared-kernel' : null,
+    cli: placement === 'vps' ? 'sudo llll compute enable --trust-shared-kernel' : null,
     durability: 'Task code, Git history and pending source edits are checkpointed. Dependencies, build output, process memory and running services are disposable.',
     costs: placement === 'vps'
       ? 'This VPS executor uses your host CPU, disk and network. Model-provider usage is billed separately.'
@@ -82,8 +82,13 @@ export async function configureCloudflareFactory(env: L4Env, auth: Authorization
   return factorySetup(env, auth)
 }
 export async function dispatchCloudflareFactory(env: L4Env, actionId: string, workspaceId: string, nodeId: string) {
-  if (!env.FACTORY_COMPUTE) return
   const node = await env.DB.prepare('SELECT capabilities_json AS capabilitiesJson FROM compute_nodes WHERE id=? AND enabled=1').bind(nodeId).first<{ capabilitiesJson: string }>()
+  if (node && JSON.parse(node.capabilitiesJson).provider === 'lizard') {
+    const { ensureLizardCompute } = await import('./lizard-control')
+    await ensureLizardCompute(env, nodeId)
+    return
+  }
+  if (!env.FACTORY_COMPUTE) return
   if (node && JSON.parse(node.capabilitiesJson).provider === 'cloudflare-containers') {
     const result = await env.FACTORY_COMPUTE.getByName(`workspace:${workspaceId}`).fetch(new Request(`http://factory/${actionId}`, { method: 'POST' }))
     if (!result.ok) fail(503, 'factory_dispatch_failed', 'Factory is unavailable; the approved action remains recorded')

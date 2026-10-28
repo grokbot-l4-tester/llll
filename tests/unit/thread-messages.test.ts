@@ -34,9 +34,11 @@ beforeEach(() => {
     useApi: () => ({ api: vi.fn(async () => ({ messages: [reply], rootMessage: root, nextCursor: null })) }),
     useSessionStore: () => ({ user: { id: 'human' } }),
     usePresenceStore: () => ({ agentTurnsIn: () => [] }),
+    usePermissions: () => ({ mine: ref(null), can: () => false }),
     useUiStore: () => ({ searchQuery: '', searchOpen: false, threadId: 'thread', composerState: () => ({ editingId: null }) }),
     usePrefsStore: () => ({ compact: false, recentEmoji: [] }),
     useToast: () => ({ add: vi.fn() }),
+    useServer: () => ({ serverId: ref('server') }),
     useRouter: () => ({ currentRoute: ref({ path: '/agents/parent', params: {}, query: {} }) }),
   })) vi.stubGlobal(name, value)
 })

@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import SettingsEditor from './SettingsEditor.vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import type { GitConnection } from '~~/shared/git-connections'
 const {api}=useApi(),qc=useQueryClient(),toast=useToast()
 const connections=useQuery({queryKey:['git-connections'],queryFn:()=>api<{connections:GitConnection[];canConfigure:boolean}>('/api/git-connections')})
 const prepared=ref<{actionUrl:string;manifest:Record<string,unknown>}|null>(null)
 const submitted=ref(false)
+const connectOpen=ref(false),detailOpen=ref(false),selectedId=ref<string|null>(null)
+const selected=computed(()=>connections.data.value?.connections.find(c=>c.id===selectedId.value))
 let preparedConnections:string[]=[]
 const name=ref('L4 project code'),account=ref(''),organization=ref(false),busy=ref(false)
 async function connect(){
@@ -40,6 +43,7 @@ async function refresh(){
  await qc.invalidateQueries({queryKey:['code-environments']})
  await qc.invalidateQueries({queryKey:['agent-repositories']})
 }
+defineExpose({ openConnect: () => { connectOpen.value = true }, refresh })
 async function disconnect(id:string){
  busy.value=true
  try{await api('/api/git-connections/'+id,{method:'DELETE'});await connections.refetch();await qc.invalidateQueries({queryKey:['code-environments']});await qc.invalidateQueries({queryKey:['agent-repositories']})}
@@ -47,15 +51,11 @@ async function disconnect(id:string){
 }
 </script>
 <template>
- <section class="space-y-4 rounded-lg border border-default p-4">
-  <h2 class="font-medium">Git provider connections</h2>
-  <p class="text-sm text-muted">Connect a GitHub App, then choose the repositories it can access on GitHub. L4 keeps its credentials on this Server and checks each operation against project and Role permissions.</p>
-  <UButton label="Refresh connections" color="neutral" variant="outline" @click="refresh" />
+ <section class="space-y-4">
   <LayoutLoadError v-if="connections.error.value" message="Git connections did not load." :retry="connections.refetch" />
-  <div v-for="c in connections.data.value?.connections" :key="c.id" class="space-y-2 rounded border border-default p-3">
-   <p class="break-words font-medium">{{c.name}} · {{c.account}} <UBadge :label="c.enabled ? 'Active' : 'Disabled'" :color="c.enabled ? 'success' : 'neutral'" /></p>
-   <div class="flex flex-wrap gap-2"><UButton v-if="c.enabled && connections.data.value?.canConfigure" :to="c.setupUrl" target="_blank" label="Choose repositories on GitHub" color="neutral" variant="outline" /><UButton v-if="c.enabled && connections.data.value?.canConfigure" label="Disable in L4" color="neutral" variant="ghost" :loading="busy" @click="disconnect(c.id)" /></div>
-  </div>
+  <SettingsList :items="connections.data.value?.connections ?? []" :item-key="c => c.id" :search-text="c => `${c.name} ${c.account}`" :loading="connections.isPending.value" placeholder="Search connections" :noun="['connection', 'connections']" @select="c => { selectedId = c.id; detailOpen = true }"><template #row="{ item: c }"><span class="flex size-8 shrink-0 items-center justify-center rounded-md bg-elevated text-muted"><UIcon name="i-ph-git-branch" class="size-4" /></span><span class="min-w-0 flex-1"><span class="block text-sm font-medium text-highlighted">{{ c.name }}</span><span class="block text-xs text-muted">{{ c.account }}</span></span><UBadge :label="c.enabled ? 'Active' : 'Disabled'" :color="c.enabled ? 'success' : 'neutral'" /></template></SettingsList>
+  <SettingsEditor v-model:open="detailOpen" back="Repositories" :title="selected?.name ?? 'Git connection'" description="Manage the repositories this connection can access."><template #body><div v-if="selected" class="space-y-4"><p>{{selected.account}} · {{selected.enabled ? 'Active' : 'Disabled'}}</p><div class="flex flex-wrap gap-2"><UButton v-if="selected.enabled && connections.data.value?.canConfigure" :to="selected.setupUrl" target="_blank" label="Choose repositories on GitHub" color="neutral" variant="outline" /><UButton v-if="selected.enabled && connections.data.value?.canConfigure" label="Disable in L4" color="neutral" variant="ghost" :loading="busy" @click="disconnect(selected.id)" /></div></div></template></SettingsEditor>
+  <SettingsEditor v-model:open="connectOpen" back="Repositories" title="Connect GitHub" description="Create a GitHub App owned by your account or organization."><template #body><div class="space-y-5">
   <form v-if="connections.data.value?.canConfigure" class="space-y-3" @submit.prevent="connect">
    <UFormField label="Connection name"><UInput v-model="name" class="w-full" /></UFormField>
    <UFormField label="GitHub account or organization"><UInput v-model="account" placeholder="Your GitHub username or organization" class="w-full" /></UFormField>
@@ -70,5 +70,6 @@ async function disconnect(id:string){
    <UButton type="submit" label="Create App on GitHub" :disabled="submitted||busy" />
    <UButton type="button" label="Prepare again after GitHub sign-in" color="neutral" variant="outline" :loading="busy" @click="resumeAfterSignIn" />
   </form>
+  </div></template></SettingsEditor>
  </section>
 </template>

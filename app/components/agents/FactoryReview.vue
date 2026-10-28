@@ -29,7 +29,7 @@ async function decide(action: FactoryAction, decision: 'approve' | 'reject') {
 </script>
 <template>
   <section v-if="query.data.value?.workspace || query.error.value" class="space-y-4 rounded-lg border border-default p-4">
-    <h2 class="font-medium">Software Factory</h2>
+    <h2 class="font-medium">Task workspace</h2>
     <LayoutLoadError v-if="query.error.value" message="Private workspace actions did not load." :retry="query.refetch" />
     <template v-if="query.data.value?.workspace">
       <p class="break-all text-sm">Repository: {{ query.data.value.workspace.repository }} · {{ query.data.value.workspace.baseBranch }} → {{ query.data.value.workspace.branch }}</p>
@@ -59,7 +59,7 @@ async function decide(action: FactoryAction, decision: 'approve' | 'reject') {
 {{ JSON.stringify(query.data.value.workspace.snapshot.evidence, null, 2) }}</pre></details>
       </div>
       <article v-for="action in query.data.value.actions" :key="action.id" class="space-y-2 rounded border border-default p-3">
-        <p class="text-sm">{{ action.request.operation }} · {{ action.status }}</p>
+        <p class="text-sm">{{ action.request.operation }} · {{ action.status }} · {{ action.approvalMode === 'role' ? 'Authorized by Run permissions' : 'Human review' }}</p>
         <p class="break-all text-xs text-muted">Action {{ action.id }} · Run {{ action.runId }} · expires {{ new Date(action.expiresAt).toLocaleString() }}</p>
         <p class="break-all text-xs text-muted">Image {{ action.computeImage }} · Workspace revision {{ action.workspaceRevision }} · {{ action.computeLimits.cpu }} CPU, {{ action.computeLimits.memoryMiB }} MiB memory, {{ action.computeLimits.processes }} processes, {{ Math.round(action.diskBytes / 1048576) }} MiB hard disk capacity; commands up to {{ action.computeLimits.timeoutMs / 1000 }} seconds.</p>
         <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs">{{ JSON.stringify(action.request, null, 2) }}</pre>

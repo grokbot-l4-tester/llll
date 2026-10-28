@@ -4,7 +4,7 @@ import { runProcess } from './process.mjs'
 
 /** Trusted Linux broker only. Each mounted filesystem has a fixed allocated block capacity. */
 export class LoopDiskStore {
-  constructor(root,{bytes=1073741824,maxDisks=4,runner=runProcess,ownerUid=1000,ownerGid=1000}={}) {
+  constructor(root,{bytes=10737418240,maxDisks=4,runner=runProcess,ownerUid=1000,ownerGid=1000}={}) {
     this.root=resolve(root);this.bytes=bytes;this.maxDisks=maxDisks;this.runner=runner;this.ownerUid=ownerUid;this.ownerGid=ownerGid
   }
   paths(id) {
@@ -13,7 +13,10 @@ export class LoopDiskStore {
   }
   async command(name,args) {
     const result=await this.runner(name,args,{timeoutMs:30000,limit:4000})
-    if(result.code!==0)throw new Error('Linux disk operation failed; configure loop devices, mount permissions and free capacity')
+    if(result.code!==0) {
+      if (/no space left on device|disk quota exceeded/iu.test(result.stderr.toString())) throw new Error('Compute Node disk is full; free space or move Task storage to a larger disk')
+      throw new Error('Linux disk operation failed; configure loop devices, mount permissions and free capacity')
+    }
     return result.stdout.toString().trim()
   }
   async initialize() {

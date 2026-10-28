@@ -4,7 +4,7 @@ This is the product glossary. See [product scope](docs/product.md), [runtime arc
 
 ## L4
 
-Free MIT licensed software for independent communities. A community gathers in a Server. Chat is the starting point; Tasks, Mail, Data, Apps and Agents are capabilities within that Server.
+An MIT licensed workspace for humans and agents. People and Agents discuss work in a Server, organize it into Projects and Tasks, and work with connected repositories and shared information. Chat is a starting point for work. Mail, Data and Apps are capabilities within the same Server.
 
 ## Server
 
@@ -20,9 +20,11 @@ A human's local login identity on one Server. Accounts on different Servers are 
 
 A human or Agent participating in one Server. A human's Account identifies them; their server-local membership determines their access. An Account and a Member are different concepts.
 
-## Role and Grant
+## Role, Project policy and Grant
 
-A Role groups permissions for Members in a Server. A Grant permits an operation on a resource. The Server Owner operates its deployment; Roles grant local community permissions.
+A Member has one Server Role, which groups Server permissions. A reusable Project policy adds permissions for a person, an Agent or a Server Role in a particular Project. The same Member can have Developer access in Project A and Reviewer access in Project B. Policies add grants; they do not remove broader rights already supplied by a Server Role.
+
+A Grant permits an operation on a resource. Evaluate the operation in its Project and resource scope. The Server Owner operates its deployment; Project access does not grant Server administration or private-channel membership.
 
 ## Channel, Thread and Direct Message
 
@@ -31,6 +33,10 @@ A Channel is a conversation in one Server. A Thread is a child conversation. A D
 ## Mailbox and Email Conversation
 
 A Mailbox is a shared inbox with its own access rules and email address. An Email Conversation groups incoming mail, outgoing replies and internal notes. Both belong to one Server.
+
+## Inbox
+
+The Server rail's Inbox is one Member's queue of what is waiting on them: decisions on Runs they started (review-mode workspace actions and sharing reviews), unread mentions, their Agent work, Tasks assigned to them or waiting for their review, unread mail in Mailboxes they can read, and unread chats. A Mailbox's Inbox folder is a different thing: received email in one Mailbox. Say "Inbox" for the rail section and "the Mailbox's Inbox folder" for mail.
 
 ## Agent
 
@@ -56,4 +62,4 @@ A Provider supplies an optional capability such as email delivery, inference or 
 
 ## Conversations
 
-A DM has two participants inside one Server. Larger conversations use channels, which are open or private. Changing a private channel's members preserves its ID, threads and history. Only its creator can add or remove members; existing groups without recorded creators receive no guessed administrator. The Server Owner can explicitly assign a current human participant as creator of such a channel; assignment is audited and grants no membership. Adding a member grants the whole history, with the previous messages treated as read. New messages after the grant remain unread. Agent replies use threads in every conversation.
+A DM has two participants inside one Server. Larger conversations use channels, which are open or private. Changing a private channel's members preserves its ID, threads and history. Only its creator can add or remove members; existing groups without recorded creators receive no guessed administrator. The Server Owner can explicitly assign a current human participant as creator of such a channel; assignment is audited and grants no membership. Adding a member grants the whole history, with the previous messages treated as read. New messages after the grant remain unread. Agent replies use threads in every conversation. An archived channel leaves Chat navigation and the Inbox and is read-only for everyone, its Threads included: no messages, edits, reactions, pins, new Threads, Live rooms or Agent Runs. Its history stays readable at its links and in search. Members with Manage channels archive and restore it; a private channel, like its visibility, only by its creator. The last active channel cannot be archived.

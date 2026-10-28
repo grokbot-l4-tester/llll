@@ -8,6 +8,8 @@ import { channelPath, mailPath } from '~~/shared/paths'
 import { useClipboard } from '@vueuse/core'
 import { chatNavigationTarget, hasServerNavigationMenu, serverNavigationSection } from '~~/shared/server-navigation'
 import { publicIconPath } from '~~/shared/server-appearance'
+import { pausedSections } from '~~/shared/features'
+import ServerAvatar from '../../../packages/client-ui/ServerAvatar.vue'
 
 const props = defineProps<{ serverId: string }>()
 const emit = defineEmits<{ selectSection: [path: string]; selectResource: [navigates: boolean] }>()
@@ -18,6 +20,8 @@ const toast = useToast()
 const session = useSessionStore()
 const live = useLiveStore()
 const nav = useNavActions()
+// Inside the Shell its rail already carries the L4 mark; show this Server's own avatar instead.
+const embedded = useState('llll-embed', () => ({ parent: '', enabled: false }))
 const { copy } = useClipboard()
 const { api, serverUrl } = useApi()
 
@@ -25,7 +29,7 @@ const membersQ = useQuery({
   queryKey: computed(() => ['members', props.serverId]),
   queryFn: () => api<{ members: M[] }>(`/api/servers/${props.serverId}/members`),
 })
-const { can } = usePermissions(computed(() => membersQ.data.value?.members))
+const { can, canAnyProject } = usePermissions(computed(() => membersQ.data.value?.members))
 
 const serverQ = useQuery({
   queryKey: computed(() => ['server', props.serverId]),
@@ -56,7 +60,7 @@ const connectedPath = computed(() => {
   return conversation ? channelPath(conversation) : `/channels/${id}`
 })
 
-const { unreadConversations } = useInbox(computed(() => props.serverId))
+const { attention } = useInbox(computed(() => props.serverId))
 const section = computed(() => serverNavigationSection(route.path))
 const hasMenu = computed(() => hasServerNavigationMenu(route.path))
 const chatUnread = computed(() => [...channels.value, ...(dmsQ.data.value?.channels ?? [])].some(channel => channel.unread))
@@ -70,16 +74,16 @@ const mailTarget = computed(() => {
   return first ? mailPath(first.channelId) : '/mail'
 })
 const views = computed(() => [
-  { label: 'Inbox', icon: 'i-ph-tray', to: '/inbox', path: '/inbox', count: unreadConversations.value.length, dot: false },
+  { label: 'Inbox', icon: 'i-ph-tray', to: '/inbox', path: '/inbox', count: attention.value, dot: false },
   { label: 'Chat', icon: 'i-ph-chat-circle', to: chatTarget.value, path: '/channels', count: 0, dot: chatUnread.value },
-  ...(can(Permission.readProjects) ? [{ label: 'Projects', icon: 'i-ph-folder-simple', to: '/projects', path: '/projects', count: 0, dot: false }] : []),
-  ...(can(Permission.readTasks) ? [{ label: 'Tasks', icon: 'i-ph-kanban', to: '/tasks', path: '/tasks', count: 0, dot: false }] : []),
+  ...(canAnyProject(Permission.readProjects) ? [{ label: 'Projects', icon: 'i-ph-folder-simple', to: '/projects', path: '/projects', count: 0, dot: false }] : []),
+  ...(canAnyProject(Permission.readTasks) ? [{ label: 'Tasks', icon: 'i-ph-kanban', to: '/tasks', path: '/tasks', count: 0, dot: false }] : []),
   ...(can(Permission.manageSchedules) ? [{ label: 'Schedule', icon: 'i-ph-calendar-blank', to: '/schedules', path: '/schedules', count: 0, dot: false }] : []),
   { label: 'Mail', icon: 'i-ph-envelope-simple', to: mailTarget.value, path: '/mail', count: 0, dot: mailUnread.value },
   ...(can(Permission.useAgents) || can(Permission.manageAgents) ? [{ label: 'Agents', icon: 'i-ph-robot', to: '/agents', path: '/agents', count: 0, dot: false }] : []),
   ...(can(Permission.readData) ? [{ label: 'Data', icon: 'i-ph-stack', to: '/data', path: '/data', count: 0, dot: false }] : []),
   ...(can(Permission.useGadgets) || can(Permission.manageGadgets) ? [{ label: 'Apps', icon: 'i-ph-squares-four', to: '/gadgets', path: '/gadgets', count: 0, dot: false }] : []),
-])
+].filter(view => !pausedSections.has(serverNavigationSection(view.path)!)))
 function isViewActive(path: string) {
   return section.value === serverNavigationSection(path)
 }
@@ -88,7 +92,7 @@ function selectResource(event: MouseEvent) {
 }
 const menuTitle = computed(() => views.value.find(view => isViewActive(view.path))?.label || '')
 function leaveLiveOnPageExit() {
-  if (!live.currentChannelId || live.connection !== 'connected') return
+  if (!live.currentChannelId || !live.inRoom) return
   navigator.sendBeacon?.(`/api/channels/${live.currentChannelId}/live/leave`)
 }
 
@@ -231,7 +235,7 @@ watch(nav.inviteOpen, (open) => {
 <template>
   <div class="relative flex h-full min-h-0 w-full select-none flex-col">
     <div class="flex min-h-0 flex-1">
-      <div class="flex w-[72px] shrink-0 flex-col border-e border-default bg-muted">
+      <div class="flex w-[72px] shrink-0 flex-col border-e border-default bg-muted dark:bg-black">
         <UDropdownMenu :items="serverItems" :ui="{ content: 'w-56' }">
           <button
             type="button"
@@ -239,8 +243,9 @@ watch(nav.inviteOpen, (open) => {
             :aria-label="serverName || 'Server menu'"
             :title="serverName || 'Server menu'"
           >
-            <span class="server-avatar flex size-11 items-center justify-center rounded-xl transition-colors group-data-[state=open]:bg-accented">
-              <UAvatar v-if="serverIconUrl" size="xl" :src="serverIconUrl" :alt="serverName" class="size-10 rounded-lg" />
+            <span class="server-avatar flex size-10 items-center justify-center rounded-xl transition-colors group-data-[state=open]:bg-accented">
+              <UAvatar v-if="serverIconUrl" size="lg" :src="serverIconUrl" :alt="serverName" class="size-8 rounded-lg" />
+              <ServerAvatar v-else-if="embedded.enabled" :name="serverName || 'Server'" class="size-8 rounded-lg bg-accented text-xs" />
               <BrandLogo v-else size="xl" alt="" />
             </span>
           </button>
@@ -274,7 +279,7 @@ watch(nav.inviteOpen, (open) => {
 
       </div>
 
-      <div v-if="hasMenu" class="flex min-h-0 min-w-0 flex-1 flex-col bg-muted" @click.capture="selectResource">
+      <div v-if="hasMenu" class="flex min-h-0 min-w-0 flex-1 flex-col bg-muted dark:bg-black" @click.capture="selectResource">
         <header class="flex h-12 shrink-0 items-center gap-2 px-3 shadow-[0_1px_0_var(--ui-border)]">
           <h2 class="min-w-0 flex-1 truncate text-sm font-semibold text-highlighted">{{ menuTitle }}</h2>
           <UButton v-if="section === 'agents' && can(Permission.manageAgents)" icon="i-ph-plus" color="neutral" variant="ghost" square class="size-9 justify-center" aria-label="Create agent" @click="nav.createAgentOpen.value = true" />
@@ -287,7 +292,7 @@ watch(nav.inviteOpen, (open) => {
           </nav>
           <LayoutInboxNav v-else-if="section === 'inbox'" :server-id="serverId" />
           <LayoutAgentsNav v-else-if="section === 'agents'" :server-id="serverId" />
-          <LayoutTasksNav v-else-if="section === 'tasks' && can(Permission.readTasks)" :server-id="serverId" />
+          <LayoutTasksNav v-else-if="section === 'tasks' && canAnyProject(Permission.readTasks)" :server-id="serverId" />
           <LayoutDatabasesNav v-else-if="section === 'data' && can(Permission.readData)" :server-id="serverId" />
           <LayoutGadgetsNav v-else-if="section === 'gadgets' && (can(Permission.useGadgets) || can(Permission.manageGadgets))" :server-id="serverId" />
           <LayoutMailNav v-else-if="section === 'mail'" />

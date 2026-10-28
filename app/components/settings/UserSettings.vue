@@ -143,7 +143,7 @@ async function onSaveName(event: FormSubmitEvent<Schema>) {
 }
 
 async function uploadAvatar(file: File | undefined) {
-  if (!file || avatarBusy.value || (session.health?.bindings.r2 === false && !session.health?.bindings.kv)) return
+  if (!file || avatarBusy.value || (session.health?.bindings?.r2 === false && !session.health?.bindings?.kv)) return
   avatarBusy.value = true
   try {
     const image = await prepareAvatarImage(file)
@@ -383,7 +383,7 @@ async function logout() {
               </button>
               <div class="min-w-0 space-y-2">
                 <div class="flex flex-wrap gap-2">
-                  <UButton size="sm" :label="hasAvatar ? 'Change Avatar' : 'Upload Avatar'" :loading="avatarBusy" :disabled="(session.health?.bindings.r2 === false && !session.health?.bindings.kv)" @click="avatarInput?.click()" />
+                  <UButton size="sm" :label="hasAvatar ? 'Change Avatar' : 'Upload Avatar'" :loading="avatarBusy" :disabled="(session.health?.bindings?.r2 === false && !session.health?.bindings?.kv)" @click="avatarInput?.click()" />
                   <UButton
                     v-if="hasAvatar"
                     size="sm"
@@ -543,6 +543,13 @@ async function logout() {
         <UFormField v-if="outputs.length" label="Output Device">
           <USelect v-model="outputId" :items="outputs" class="w-full" />
         </UFormField>
+        <div class="flex items-start justify-between gap-6">
+          <div>
+            <p class="font-medium text-highlighted">Ring for incoming calls</p>
+            <p class="text-sm text-muted mt-1">Play a ringtone and vibrate, where supported, while a call is ringing.</p>
+          </div>
+          <USwitch v-model="prefs.callRingtone" aria-label="Ring for incoming calls" />
+        </div>
       </div>
     </template>
 

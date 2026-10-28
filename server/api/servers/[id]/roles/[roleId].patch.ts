@@ -1,9 +1,9 @@
-import { parseResourceAccess, resourceAccessSchema } from '../../../../../shared/resource-access'
+import { parseResourceAccess } from '../../../../../shared/resource-access'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { roles } from '../../../../../drizzle/schema'
 import { nowIso } from '../../../../../shared/ids'
-import { ALL_PERMISSIONS, Permission } from '../../../../../shared/permissions'
+import { Permission } from '../../../../../shared/permissions'
 import { requireMember } from '../../../../utils/guards'
 import { cf, fail } from '../../../../utils/cf'
 import { getDb } from '../../../../utils/db'
@@ -14,10 +14,9 @@ import { revalidateLiveRooms } from '../../../../utils/live'
 import { parseBody } from '../../../../utils/validate'
 
 const bodySchema = z.object({
-  resourceAccess: resourceAccessSchema.optional(),
   name: z.string().trim().min(1).max(40).optional(),
-  permissions: z.number().int().min(0).max(ALL_PERMISSIONS).optional(),
-}).refine(body => body.name !== undefined || body.permissions !== undefined || body.resourceAccess !== undefined, 'No role changes supplied')
+  mentionable: z.boolean().optional(),
+}).strict().refine(body => body.name !== undefined || body.mentionable !== undefined, 'No role changes supplied')
 
 export default defineEventHandler(async (event) => {
   const serverId = getRouterParam(event, 'id')!
@@ -28,11 +27,12 @@ export default defineEventHandler(async (event) => {
   const db = getDb(env.DB)
   const role = (await db.select().from(roles).where(eq(roles.id, roleId)).limit(1))[0]
   if (!role) fail(404, 'not_found', 'Role not found')
-  if (role.isSystem) fail(403, 'forbidden', 'System roles cannot be changed')
+  // A built-in Role keeps its name; like its policies, only the Owner decides who may mention it.
+  if (role.isSystem && (body.name !== undefined || !actor.isOwner)) fail(403, 'forbidden', 'System roles cannot be changed')
   assertRoleManageable(actor, role)
-  const permissions = body.permissions ?? role.permissionsBitmask
+  const permissions = role.permissionsBitmask
   assertGrantScope(actor, permissions)
-  assertResourceGrantScope(actor, body.resourceAccess ?? parseResourceAccess(role.resourceAccessJson))
+  assertResourceGrantScope(actor, parseResourceAccess(role.resourceAccessJson))
   if (body.name !== undefined) {
     const existing = await db.select({ id: roles.id, name: roles.name }).from(roles)
     if (existing.some(item => item.id !== role.id && item.name.toLocaleLowerCase() === body.name!.toLocaleLowerCase())) {
@@ -42,14 +42,14 @@ export default defineEventHandler(async (event) => {
   const updated = {
     ...role,
     name: body.name ?? role.name,
+    mentionable: body.mentionable ?? role.mentionable,
     permissionsBitmask: permissions,
-    resourceAccessJson: body.resourceAccess ? JSON.stringify(body.resourceAccess) : role.resourceAccessJson,
+    resourceAccessJson: role.resourceAccessJson,
     updatedAt: nowIso(),
   }
   await db.update(roles).set({
     name: updated.name,
-    permissionsBitmask: updated.permissionsBitmask,
-    resourceAccessJson: updated.resourceAccessJson,
+    mentionable: updated.mentionable,
     updatedAt: updated.updatedAt,
   }).where(eq(roles.id, role.id))
   await writeAudit(env, {
@@ -58,7 +58,7 @@ export default defineEventHandler(async (event) => {
     action: 'role.update',
     targetType: 'role',
     targetId: role.id,
-    meta: { name: updated.name, permissions: updated.permissionsBitmask },
+    meta: { name: updated.name, permissions: updated.permissionsBitmask, mentionable: updated.mentionable },
   })
   waitUntil(signalMembersChanged(env, serverId))
   waitUntil(revalidateLiveRooms(env))

@@ -6,7 +6,7 @@ The Server has one persistent UUIDv4 allocated in D1 before owner setup. The sam
 
 ## Shell
 
-The official web/PWA/Telegram Shell connects a Server address or invitation. It embeds that Server's own Client, which authenticates and calls its own HTTP, file and WebSocket APIs. Direct use never depends on llll.gg. The Shell receives bounded metadata, unread state, navigation and call lifecycle events; it receives no password, session token, chat content or provider credential. postMessage verifies both the exact origin and iframe source.
+The official web/PWA/Telegram Shell connects a Server address or invitation. It embeds that Server's own Client, which authenticates and calls its own HTTP, file and WebSocket APIs. Direct use never depends on llll.gg. The Shell receives bounded metadata, unread state, navigation, call lifecycle events and a boolean pending-message delivery signal; it receives no password, session token, chat content or provider credential. postMessage verifies both the exact origin and iframe source. While any loaded Client has unacknowledged messages, the Shell warns before page reload or close; Cancel keeps the Client and its in-memory retry queue alive. Acknowledgement clears the warning. Message text is never copied into Shell storage, and this requires a matching updated Server Client.
 
 `/.well-known/llll` advertises `kind: server`, UUID, origin, name, version and embed origins. The official directory maps UUID directly to Server origin after checking discovery; it grants no membership. A changed identity at a bookmarked origin requires explicit reconnection. Device-local bookmarks contain metadata only; cross-device synchronization is deferred.
 
@@ -28,4 +28,4 @@ RealtimeKit, mail and AI credentials belong to the Server. Deploying it does not
 
 The first journey is deploy Server → claim owner → invite member → chat. Customer Cloudflare Servers install and update from published, immutable, checksum-verified release artifacts through the customer's own OAuth grant; they need no Git integration or Workers Builds. The optional legacy Build hook only starts an existing Server's Build. VPS deployment uses the published portable image and operator-owned configuration. Optional Factory on that VPS needs systemd as process 1, or `llll factory enable --trust-shared-kernel --no-systemd` plus the manual node command documented with Software Factory. Our own official deployments use Workers Builds from Git. See [deployment](deployment.md).
 
-The active Server schema is `server-v1`, beginning at `drizzle/server-migrations/0000_server_baseline.sql`. Create a fresh database; earlier schemas cannot be upgraded into this line. Published artifacts and Git history remain unchanged.
+The active Server schema is `server-v2`, beginning at `drizzle/server-migrations/0000_server_baseline.sql`. Create a fresh database; earlier schemas cannot be upgraded into this line. Published artifacts and Git history remain unchanged.

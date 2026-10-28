@@ -1,12 +1,15 @@
 <script setup lang="ts">
+import SettingsEditor from './SettingsEditor.vue'
 import { useQuery } from '@tanstack/vue-query'
 import type { GitConnection } from '~~/shared/git-connections'
 import type { CodeEnvironment, CodeEnvironmentInput } from '~~/shared/code-environments'
 
 defineProps<{ serverId: string }>()
+const providerTab = ref('github')
+const gitConnections = ref<{ openConnect: () => void; refresh: () => void } | null>(null)
 const { api } = useApi()
 const toast = useToast()
-const nodes = useQuery({ queryKey: ['compute-nodes'], queryFn: () => api<{ nodes: { id: string; name: string; enabled: boolean }[] }>('/api/compute-nodes') })
+const nodes = useQuery({ queryKey: ['compute-nodes'], queryFn: () => api<{ nodes: { id: string; name: string; enabled: boolean; capabilities?: { provider?: string } }[] }>('/api/compute-nodes') })
 const computeNodeId = ref<string | null>(null)
 const list = useQuery({ queryKey: ['code-environments'], queryFn: () => api<{ configured: boolean; deploymentConfigured: boolean; environments: CodeEnvironment[] }>('/api/code-environments') })
 type Repository = { id: number; name: string; installationId: number; fork: boolean; defaultBranch: string }
@@ -24,6 +27,7 @@ const baseBranch = ref('main')
 const requiredChecks = ref('')
 const previewHosts = ref('')
 const editingId = ref<string>()
+const selectedEnvironment = computed(() => list.data.value?.environments.find(item => item.id === editingId.value))
 const open = ref(false)
 const saving = ref(false)
 function edit(item?: CodeEnvironment) {
@@ -46,7 +50,7 @@ async function save() {
 }
 async function disable(item: CodeEnvironment) {
   saving.value = true
-  try { await api(`/api/code-environments/${item.id}`, { method: 'DELETE' }); await list.refetch() }
+  try { await api(`/api/code-environments/${item.id}`, { method: 'DELETE' }); open.value = false; await list.refetch() }
   catch (error) { toast.add({ title: errorMessage(error), color: 'error' }) }
   finally { saving.value = false }
 }
@@ -54,35 +58,31 @@ async function disable(item: CodeEnvironment) {
 
 <template>
   <div class="space-y-6">
-    <SettingsHeader title="Repository environments" description="Choose where agents can read code and propose changes. Assign repository access and agent permissions in Roles." />
-    <SettingsGitConnections />
-    <SettingsFactorySetup />
-    <details><summary class="cursor-pointer text-sm">Advanced: remote Compute Nodes</summary><SettingsComputeNodes /></details>
-    <LayoutLoadError v-if="list.error.value || repositories.error.value" message="Repository configuration did not load." :retry="() => { list.refetch(); repositories.refetch() }" />
-    <UAlert v-if="list.data.value && !list.data.value.configured" title="Connect a dedicated GitHub App" description="Create a GitHub App connection above, authorize its repositories on GitHub, then select that connection for Git execution." color="neutral" variant="subtle" />
+    <SettingsHeader title="Repositories"><template #actions><UButton v-if="providerTab === 'github'" icon="i-ph-arrows-clockwise" aria-label="Refresh Git connections" color="neutral" variant="ghost" @click="gitConnections?.refresh()" /><UButton v-if="providerTab === 'github' && connections.data.value?.canConfigure" label="Connect GitHub" icon="i-ph-plus" @click="gitConnections?.openConnect()" /><UButton v-else-if="providerTab === 'environments' && list.data.value?.configured" label="Add environment" icon="i-ph-plus" @click="edit()" /></template></SettingsHeader>
+    <LayoutSegmentedTabs v-model="providerTab" :items="[{ label: 'GitHub', value: 'github' }, { label: 'GitLab', value: 'gitlab' }, { label: 'Gitea', value: 'gitea' }, { label: 'Environments', value: 'environments' }]" label="Repository providers" />
+    <SettingsGitConnections v-if="providerTab === 'github'" ref="gitConnections" />
+    <p v-else-if="providerTab === 'gitlab' || providerTab === 'gitea'" class="text-sm text-muted">{{ providerTab === 'gitlab' ? 'GitLab' : 'Gitea' }} connections are not available yet.</p>
     <template v-else>
-      <UFormField label="Git connection"><USelect v-model="connectionId" :items="connectionOptions" placeholder="Choose a Git connection" class="w-full" /></UFormField>
-      <UButton label="Refresh repositories" color="neutral" variant="outline" @click="repositories.refetch()" />
-      <ul class="space-y-1 text-sm text-muted"><li v-for="repo in repositories.data.value?.repositories" :key="repo.id">{{ repo.name }}</li></ul>
-      <UButton label="Add environment" icon="i-ph-plus" color="neutral" :disabled="!repositories.data.value?.repositories.length" @click="edit()" />
-      <p v-if="repositories.data.value && !repositories.data.value.repositories.length" class="text-sm text-muted">Choose a Git connection above. If no repositories appear, authorize repositories on GitHub and refresh the list.</p>
-      <div v-for="item in list.data.value?.environments" :key="item.id" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-default p-4">
-        <div class="min-w-0"><p class="font-medium">{{ item.name }} <UBadge v-if="!item.enabled" label="Disabled" color="neutral" variant="subtle" /></p><p class="break-all text-sm text-muted">{{ item.sourceRepo }} · {{ item.baseBranch }}</p><p class="break-all text-xs text-muted">Working repository: {{ item.workRepo }}<br>Compute Node: {{ nodes.data.value?.nodes.find(node => node.id === item.computeNodeId)?.name || 'Not connected' }} · Required CI: {{ item.requiredChecks.join(', ') }}</p></div>
-        <div class="flex gap-2"><UButton label="Edit" color="neutral" variant="outline" @click="edit(item)" /><UButton v-if="item.enabled" label="Disable" color="neutral" variant="ghost" :loading="saving" @click="disable(item)" /></div>
-      </div>
+      <LayoutLoadError v-if="list.error.value || repositories.error.value" message="Repository configuration did not load." :retry="() => { list.refetch(); repositories.refetch() }" />
+      <UAlert v-if="list.data.value && !list.data.value.configured" title="Connect a GitHub App" description="Connect GitHub and authorize repositories before adding an environment." color="neutral" variant="subtle" />
+      <SettingsList :items="list.data.value?.environments ?? []" :item-key="item => item.id" :search-text="item => `${item.name} ${item.sourceRepo}`" placeholder="Search environments" :noun="['environment', 'environments']" @select="edit">
+        <template #row="{ item }"><span class="flex size-8 shrink-0 items-center justify-center rounded-md bg-elevated text-muted"><UIcon name="i-ph-git-branch" class="size-4" /></span><span class="min-w-0 flex-1"><span class="block font-medium">{{ item.name }} <UBadge v-if="!item.enabled" label="Disabled" color="neutral" variant="subtle" /></span><span class="block truncate text-xs text-muted">{{ item.sourceRepo }} · {{ item.baseBranch }}</span></span></template>
+      </SettingsList>
     </template>
-    <UModal v-model:open="open" :title="editingId ? 'Edit environment' : 'Add environment'" description="Saving changes revokes Runs and scheduled mandates using the previous configuration.">
+    <SettingsEditor v-model:open="open" back="Repositories" :title="editingId ? 'Edit environment' : 'Add environment'" description="Saving changes revokes Runs and scheduled mandates using the previous configuration.">
       <template #body><div class="space-y-4">
-        <UFormField label="Git connection"><USelect v-model="connectionId" :items="connectionOptions" placeholder="Choose a Git connection" class="w-full" /></UFormField>
         <UFormField label="Name" help="A short label for this repository and execution setup, for example Website fixes."><UInput v-model="name" class="w-full" /></UFormField>
+        <UFormField label="Git connection"><USelect v-model="connectionId" :items="connectionOptions" placeholder="Choose a Git connection" class="w-full" /></UFormField>
+        <UButton label="Refresh repositories" color="neutral" variant="outline" @click="repositories.refetch()" />
+        <p v-if="repositories.data.value && !repositories.data.value.repositories.length" class="text-sm text-muted">Choose a Git connection. If no repositories appear, authorize them on GitHub and refresh the list.</p>
         <UFormField label="Source repository"><USelect v-model="sourceId" :items="options" placeholder="Choose source" class="w-full" /></UFormField>
         <UFormField label="Working repository" help="Choose the source repository for ordinary branch-based work, or an optional fork. Changes use a dedicated working branch."><USelect v-model="workId" :items="options" placeholder="Choose repository" class="w-full" /></UFormField>
-        <UFormField label="Compute Node" help="Coding uses this connected Node and persistent Task disk. No provider is provisioned automatically."><USelect v-model="computeNodeId" :items="[{ label: 'No compute backend', value: null }, ...(nodes.data.value?.nodes ?? []).filter(node => node.enabled).map(node => ({ label: node.name, value: node.id }))]" class="w-full" /></UFormField>
+        <UFormField label="Compute Node" help="Choose where this repository's task runs execute."><USelect v-model="computeNodeId" :items="[{ label: 'No compute backend', value: null }, ...(nodes.data.value?.nodes ?? []).filter(node => node.enabled).map(node => ({ label: node.capabilities?.provider === 'lizard' ? 'Lizard' : node.name, value: node.id }))]" class="w-full" /></UFormField>
         <UFormField label="Base branch"><UInput v-model="baseBranch" class="w-full" /></UFormField>
         <UFormField label="Required CI checks" help="One exact check or commit-status name per line. Missing checks keep the proposal unverified."><UTextarea v-model="requiredChecks" class="w-full" :rows="3" /></UFormField>
         <UFormField label="Allowed Preview domains" help="One domain per line, for example dev.example.com. Preview links must use HTTPS."><UTextarea v-model="previewHosts" class="w-full" :rows="2" /></UFormField>
       </div></template>
-      <template #footer><UButton label="Save environment" color="neutral" :loading="saving" :disabled="!name.trim() || !sourceId || !workId || !requiredChecks.trim()" @click="save" /></template>
-    </UModal>
+      <template #footer><div class="flex w-full justify-between gap-2"><UButton v-if="selectedEnvironment?.enabled" label="Disable" color="error" variant="ghost" :loading="saving" @click="disable(selectedEnvironment)" /><span v-else /><UButton label="Save environment" color="neutral" :loading="saving" :disabled="!name.trim() || !sourceId || !workId || !requiredChecks.trim()" @click="save" /></div></template>
+    </SettingsEditor>
   </div>
 </template>

@@ -1,12 +1,13 @@
 import { authorizedPublicationMessage } from '../server/utils/run-publication'
-import { removeMessageData, retryDeletedFiles } from '../shared/file-cleanup'
+import { retryDeletedFiles } from '../shared/file-cleanup'
+import { messageDeleteRole, messageSendRate, removeChannelMessage, takeRate } from '../server/utils/message-service'
 import { parseResourceAccess, resourceAccessAllows } from '../shared/resource-access'
 import { getServerId } from '../shared/server-id'
 import { DurableObject } from 'cloudflare:workers'
 import { z } from 'zod'
 import type { AttachmentDTO, LiveState, MessageDTO, PublicUser, ServerMsg } from '../shared/types'
 import { extractMentionIds } from '../shared/mentions'
-import { canAccessAgentConversation, isDmType } from '../shared/dm'
+import { canAccessAgentConversation, dmFrozen, isDmType } from '../shared/dm'
 import { ALL_PERMISSIONS, directMessagePermissions, hasPermission, Permission } from '../shared/permissions'
 import { liveKindFor } from '../shared/live'
 import { resolveChannelPermissions } from '../shared/channel-permissions'
@@ -21,24 +22,34 @@ import { signalLiveChanged } from './live-events'
 import {
   emptyLive,
   isLiveHost,
+  LIVE_END_RETRY_LIMIT,
   LIVE_PRESENCE_TTL_MS,
   LIVE_RING_TIMEOUT_MS,
+  liveEndRetryDelayMs,
   liveFailure,
   liveGraceMs,
   normalizeLive,
   type LiveEndResult,
+  type LiveEndRetry,
   type LiveJoinResult,
 } from './live-room'
 import { signalChannelActivity, signalChannelRead } from './channel-activity'
 import { signalAgentsForMessage } from './agent-ingress'
+import { persistMessageEdit } from './message-edits'
+import { mentionedRoleIds, roleMentionRecipients, roleMentionStatement, type RoleMention } from './role-mentions'
 import { listAgentTurns } from './agent-turns'
 import { AGENT_REACTION_EMOJIS, replaceAgentReaction } from './agent-reactions'
 import { mailPermissionAllows } from '../shared/mail'
+import { ARCHIVED_CHANNEL_WITHHELD, CHANNEL_ARCHIVED_CODE, CHANNEL_ARCHIVED_MESSAGE } from '../shared/channel-archive'
 import { createSerialQueue } from './serial-queue'
 import { authorizedSockets } from './socket-access'
 
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000
+
 type Sock = { userId: string; user: PublicUser; sessionId?: string }
-type Authz = { serverId: string; perms: number; ownerId: string; type: string; frozen: boolean; canManageAgents: boolean; mailbox: boolean }
+type StartLimiter = { take: (n: number, w: number) => Promise<boolean>, giveBack: () => Promise<void> }
+/** `archived`: the channel, or a Thread's parent, is archived and accepts no new activity. */
+type Authz = { serverId: string; perms: number; ownerId: string; type: string; frozen: boolean; canManageAgents: boolean; mailbox: boolean; archived: boolean }
 
 const createSchema = z.object({
   t: z.literal('message.create'),
@@ -182,18 +193,20 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
   async postAgentMessage(input: z.infer<typeof agentPostSchema>): Promise<{ id: string, channelId: string }> {
     const body = agentPostSchema.parse(input)
     const authz = await this.loadAuthz(body.agentId)
+    if (authz?.archived) throw new Error(CHANNEL_ARCHIVED_MESSAGE)
     if (!authz || !hasPermission(authz.perms, Permission.sendMessages)) {
       throw new Error('Agent cannot send messages in this channel')
     }
     const agent = await this.env.DB.prepare(
-      `SELECT u.id, u.kind, u.display_name as displayName, u.avatar_r2_key as avatarR2Key
-       FROM users u JOIN agents a ON a.user_id = u.id
+      `SELECT u.id, u.kind, u.display_name as displayName, u.avatar_r2_key as avatarR2Key, r.permissions_bitmask as permissions
+       FROM users u JOIN agents a ON a.user_id = u.id JOIN roles r ON r.id=u.role_id
        WHERE u.id = ? AND u.kind = 'agent' AND u.status = 'active' AND a.status = 'active'`,
     ).bind(body.agentId).first<{
       id: string
       kind: 'agent'
       displayName: string
       avatarR2Key: string | null
+      permissions: number
     }>()
     if (!agent) throw new Error('Agent is unavailable')
 
@@ -214,7 +227,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
        LEFT JOIN email_mailbox_access a ON a.channel_id = mb.channel_id AND a.user_id = ?
        WHERE mb.channel_id = ?`,
     ).bind(agent.id, accessChannelId).first<{ enabled: number; permission: 'read' | 'send' | 'manage' | null }>()
-    if (mailbox && (!mailbox.enabled || !mailbox.permission || !mailPermissionAllows(mailbox.permission, 'send'))) {
+    if (mailbox && (!mailbox.enabled || !mailbox.permission || !mailPermissionAllows(mailbox.permission, 'send') || !hasPermission(agent.permissions, Permission.sendMail))) {
       throw new Error('Agent cannot send in this mailbox')
     }
 
@@ -277,6 +290,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
   async updateAgentMessage(input: z.infer<typeof agentUpdateSchema>): Promise<void> {
     const body = agentUpdateSchema.parse(input)
     const authz = await this.loadAuthz(body.agentId)
+    if (authz?.archived) throw new Error(CHANNEL_ARCHIVED_MESSAGE)
     if (!authz || !hasPermission(authz.perms, Permission.sendMessages)) throw new Error('Agent cannot edit in this channel')
     const row = await this.env.DB.prepare(
       `SELECT m.id
@@ -295,6 +309,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
   async setAgentReaction(input: z.infer<typeof agentReactionSchema>): Promise<void> {
     const body = agentReactionSchema.parse(input)
     const authz = await this.loadAuthz(body.agentId)
+    if (authz?.archived) throw new Error(CHANNEL_ARCHIVED_MESSAGE)
     if (!authz || !hasPermission(authz.perms, Permission.sendMessages)) throw new Error('Agent cannot react in this channel')
     const target = await this.env.DB.prepare(
       `SELECT m.id
@@ -322,9 +337,12 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     return normalizeLive(await this.ctx.storage.get('live'))
   }
 
-  /** Join the room, starting it first when it is idle and the member may start one. */
-  async joinLive(user: PublicUser): Promise<LiveJoinResult> {
-    return this.liveInOrder(() => this.joinLiveNow(user))
+  /**
+   * Join the room, starting it first when it is idle and the member may start one.
+   * A reconnect names the meeting it dropped from and never starts a new room.
+   */
+  async joinLive(user: PublicUser, opts: { meetingId?: string } = {}): Promise<LiveJoinResult> {
+    return this.liveInOrder(() => this.joinLiveNow(user, opts))
   }
 
   async leaveLive(userId: string): Promise<LiveState> {
@@ -350,6 +368,48 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
         return liveFailure('forbidden', 'Only the person who started it or a channel manager can end this live session')
       }
       return { ok: true as const, live: await this.endLiveNow({}) }
+    })
+  }
+
+  /**
+   * End the room without a host, because the server's RealtimeKit connection
+   * is being removed or replaced and its meeting would become unreachable.
+   */
+  async closeLive(): Promise<LiveState> {
+    return this.liveInOrder(async () => {
+      const live = await this.getLive()
+      if (!live.active) return live
+      return this.endLiveNow({})
+    })
+  }
+
+  /**
+   * A host removes someone from the room. They leave the media session and
+   * their token is revoked; they may join again while they can open the
+   * conversation. A Call has no one else to remove, so it is hung up instead.
+   */
+  async removeLiveParticipant(hostId: string, userId: string): Promise<LiveEndResult> {
+    return this.liveInOrder(async () => {
+      const live = await this.getLive()
+      if (!live.active || !live.meetingId) return liveFailure('not_found', 'No live session')
+      if (live.kind === 'call') return liveFailure('forbidden', 'Hang up to end a call')
+      if (hostId === userId) return liveFailure('forbidden', 'Leave the live session instead')
+      const authz = await this.loadAuthz(hostId)
+      if (!authz || !isLiveHost(live, hostId, { directMessage: isDmType(authz.type), perms: authz.perms })) {
+        return liveFailure('forbidden', 'Only the person who started it or a channel manager can remove participants')
+      }
+      const seats = await this.liveSeats()
+      const seat = seats[userId]
+      if (!seat) return liveFailure('not_found', 'They are no longer in the live session')
+      const media = await liveMedia(this.env)
+      if (!media) return liveFailure('realtimekit_unconfigured', 'Live needs RealtimeKit')
+      try {
+        await media.removeParticipants(live.meetingId, [seat.participantId])
+      }
+      catch {
+        return liveFailure('realtimekit_failed', 'RealtimeKit could not remove them from the live session')
+      }
+      return { ok: true as const, live: await this.vacateLiveSeat(live, userId, seats) }
     })
   }
 
@@ -383,8 +443,9 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     await this.liveInOrder(async () => {
       const live = await this.getLive()
       if (!live.active || !live.meetingId) return
-      const exists = await this.env.DB.prepare('SELECT id FROM channels WHERE id = ?').bind(this.channelId()).first()
-      if (!exists) {
+      // A deleted or archived conversation's room ends for everyone.
+      const open = await this.env.DB.prepare('SELECT id FROM channels WHERE id = ? AND archived_at IS NULL').bind(this.channelId()).first()
+      if (!open) {
         await this.endLiveNow({})
         return
       }
@@ -463,6 +524,10 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       message,
       clientId: body.clientId,
     })
+    if (authz.archived) {
+      fail(CHANNEL_ARCHIVED_CODE, CHANNEL_ARCHIVED_MESSAGE)
+      return
+    }
     if (authz.frozen) {
       fail('frozen', 'You can no longer send messages to this user')
       return
@@ -479,23 +544,22 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       fail('bad_request', 'Empty message')
       return
     }
-    const limiter = asRpc<{ take: (n: number, w: number) => Promise<boolean> }>(this.env.RATE_LIMIT_DO.getByName(`user:${sock.userId}:msg`))
-    const ok = await limiter.take(30, 10_000)
-    if (!ok) {
-      fail('rate_limited', 'Slow down')
+    const idemKey = `idem:${sock.userId}:${body.clientId}`
+    const existing = await this.ctx.storage.get<{ id: string; at: number } | string>(idemKey)
+    const existingId = typeof existing === 'string' ? existing : existing && Date.now() - existing.at < IDEMPOTENCY_TTL_MS ? existing.id : null
+    if (existingId) {
+      this.send(ws, { t: 'ack', clientId: body.clientId, id: existingId })
       return
     }
-
-    const idemKey = `${sock.userId}:${body.clientId}`
-    const existing = await this.ctx.storage.get<string>(`idem:${idemKey}`)
-    if (existing) {
-      this.send(ws, { t: 'ack', clientId: body.clientId, id: existing })
+    if (!await takeRate(this.env, messageSendRate(sock.userId))) {
+      fail('rate_limited', 'Slow down')
       return
     }
 
     const id = newId()
     const createdAt = nowIso()
     const mentions = await this.validMentions(extractMentionIds(body.content))
+    const roleMentions = await roleMentionRecipients(this.env, { channelId: this.channelId(), authorId: sock.userId, content: body.content, mentions })
     const attachmentIds = [...new Set(body.attachmentIds ?? [])]
     if (attachmentIds.length !== (body.attachmentIds?.length ?? 0)) {
       fail('bad_request', 'Duplicate attachment')
@@ -540,6 +604,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       content: body.content,
       replyTo,
       mentions,
+      roleMentions: mentionedRoleIds(roleMentions),
       attachments,
       reactions: [],
       pin: null,
@@ -550,7 +615,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       clientId: body.clientId,
     }
 
-    await this.persistMessage(dto, body.replyToId ?? null)
+    await this.persistMessage(dto, body.replyToId ?? null, roleMentions)
     this.ctx.waitUntil(signalNotificationOutbox(this.env))
     this.ctx.waitUntil(signalChannelActivity(this.env, {
       id,
@@ -560,7 +625,8 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       attachmentCount: attachments.length,
     }))
     this.ctx.waitUntil(signalChannelRead(this.env, sock.userId, this.channelId(), id))
-    await this.ctx.storage.put(`idem:${idemKey}`, id)
+    await this.ctx.storage.put(idemKey, { id, at: Date.now() })
+    await this.pruneIdempotency()
     await this.broadcast({ t: 'message', message: dto })
     this.send(ws, { t: 'ack', clientId: body.clientId, id })
     this.ctx.waitUntil(signalAgentsForMessage(this.env, {
@@ -621,6 +687,10 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
   }
 
   private async onUpdate(ws: WebSocket, sock: Sock, authz: Authz, body: z.infer<typeof updateSchema>) {
+    if (authz.archived) {
+      this.send(ws, { t: 'error', code: CHANNEL_ARCHIVED_CODE, message: CHANNEL_ARCHIVED_MESSAGE })
+      return
+    }
     if (!hasPermission(authz.perms, Permission.sendMessages)) {
       this.send(ws, { t: 'error', code: 'forbidden', message: 'Cannot edit messages in this channel' })
       return
@@ -647,39 +717,54 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     if (row.deleted_at) return
     const editedAt = nowIso()
     const mentions = await this.validMentions(extractMentionIds(body.content))
-    await this.env.DB.batch([
-      this.env.DB.prepare('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?').bind(body.content, editedAt, body.id),
-      this.env.DB.prepare('DELETE FROM message_mentions WHERE message_id = ?').bind(body.id),
-      ...mentions.map((userId) => this.env.DB.prepare(
-        'INSERT OR IGNORE INTO message_mentions (message_id, user_id) VALUES (?, ?)',
-      ).bind(body.id, userId)),
-    ])
+    const { added, notified } = await persistMessageEdit(this.env, { id: body.id, channelId: this.channelId(), author: sock.user, content: body.content, mentions, editedAt })
     const dto = await this.loadMessage(body.id)
     if (dto) await this.broadcast({ t: 'message.update', message: dto })
+    if (notified.length) this.ctx.waitUntil(signalNotificationOutbox(this.env))
+    if (added.length) {
+      this.ctx.waitUntil(signalAgentsForMessage(this.env, {
+        messageId: body.id,
+        channelId: this.channelId(),
+        authorId: sock.userId,
+        authorName: sock.user.displayName,
+        content: body.content,
+        mentionIds: added,
+        edit: true,
+      }))
+    }
   }
 
   private async onDelete(ws: WebSocket, sock: Sock, authz: Authz, id: string) {
-    if (!hasPermission(authz.perms, Permission.sendMessages)) {
-      this.send(ws, { t: 'error', code: 'forbidden', message: 'Cannot delete messages in this channel' })
-      return
-    }
     const row = await this.env.DB.prepare(
-      'SELECT author_id, channel_id FROM messages WHERE id = ?',
-    ).bind(id).first<{ author_id: string; channel_id: string }>()
+      'SELECT author_id, channel_id, deleted_at FROM messages WHERE id = ?',
+    ).bind(id).first<{ author_id: string; channel_id: string; deleted_at: string | null }>()
     if (!row || row.channel_id !== this.channelId()) {
       this.send(ws, { t: 'error', code: 'not_found', message: 'Message not found' })
       return
     }
-    if (row.author_id !== sock.userId) {
+    const role = messageDeleteRole(row.author_id, sock.userId, { perms: authz.perms, mailbox: authz.mailbox })
+    if (!role) {
       this.send(ws, { t: 'error', code: 'forbidden', message: 'Not your message' })
       return
     }
-    const deletedAt = nowIso()
-    const pin = await this.env.DB.prepare('SELECT message_id FROM message_pins WHERE message_id = ?').bind(id).first()
-    await removeMessageData(this.env, id, deletedAt)
+    if (row.deleted_at) return
+    const pinned = await removeChannelMessage(this.env, { id, channelId: row.channel_id, authorId: row.author_id, actorId: sock.userId,
+      serverId: authz.serverId, moderator: role === 'moderator' })
     this.ctx.waitUntil(retryDeletedFiles(this.env))
     await this.broadcast({ t: 'message.delete', id })
-    if (pin) await this.broadcast({ t: 'pin', messageId: id, pin: null })
+    if (pinned) await this.broadcast({ t: 'pin', messageId: id, pin: null })
+  }
+
+  /** Sweeps a bounded slice of idempotency keys per send, so old keys expire without a scan. */
+  private async pruneIdempotency() {
+    const cursor = await this.ctx.storage.get<string>('idemCursor')
+    const page = await this.ctx.storage.list<{ id: string; at: number } | string>({ prefix: 'idem:', ...(cursor ? { startAfter: cursor } : {}), limit: 32 })
+    const now = Date.now()
+    const expired = [...page].filter(([, value]) => typeof value !== 'object' || now - value.at >= IDEMPOTENCY_TTL_MS).map(([key]) => key)
+    if (expired.length) await this.ctx.storage.delete(expired)
+    const last = [...page.keys()].at(-1)
+    if (page.size < 32 || !last) await this.ctx.storage.delete('idemCursor')
+    else await this.ctx.storage.put('idemCursor', last)
   }
 
   private async onRead(sock: Sock, _authz: Authz, messageId: string) {
@@ -712,10 +797,11 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     this.ctx.waitUntil(signalChannelRead(this.env, sock.userId, this.channelId(), cursor))
   }
 
-  private async joinLiveNow(user: PublicUser): Promise<LiveJoinResult> {
+  private async joinLiveNow(user: PublicUser, opts: { meetingId?: string }): Promise<LiveJoinResult> {
     const authz = await this.loadAuthz(user.id)
     if (!authz) return liveFailure('not_found', 'Conversation not found')
     if (authz.mailbox) return liveFailure('forbidden', 'Live sessions are unavailable for mailboxes')
+    if (authz.archived) return liveFailure('channel_archived', CHANNEL_ARCHIVED_MESSAGE)
     if (authz.type === 'thread') return liveFailure('forbidden', 'Join the live session in the parent conversation')
     if (authz.frozen) return liveFailure('frozen', 'You can no longer call in this Direct Message')
     if (!callsProvider(this.env)) {
@@ -727,11 +813,15 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     const directMessage = isDmType(authz.type)
     let live = await this.getLive()
     const starting = !live.active || !live.meetingId
+    if (opts.meetingId && (starting || live.meetingId !== opts.meetingId)) {
+      return liveFailure('not_found', 'The live session has ended')
+    }
+    let limiter: StartLimiter | null = null
     if (starting) {
       if (!hasPermission(authz.perms, Permission.startLive)) {
         return liveFailure('forbidden', 'Your role cannot start live sessions here. You can join once someone else starts one.')
       }
-      const limiter = asRpc<{ take: (n: number, w: number) => Promise<boolean> }>(this.env.RATE_LIMIT_DO.getByName(`user:${user.id}:live`))
+      limiter = asRpc<StartLimiter>(this.env.RATE_LIMIT_DO.getByName(`user:${user.id}:live`))
       if (!await limiter.take(10, 60 * 60 * 1000)) return liveFailure('rate_limited', 'Too many live sessions started. Try again later.')
       const kind = liveKindFor(directMessage && await this.directMessageSize() === 2)
       try {
@@ -739,6 +829,8 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
         live = { active: true, meetingId: meeting.id, participantIds: [], startedBy: user.id, startedAt: nowIso(), kind, ringing: kind === 'call' }
       }
       catch {
+        // A start that RealtimeKit refused does not count against the limit.
+        this.ctx.waitUntil(limiter.giveBack().catch(() => {}))
         return liveFailure('realtimekit_failed', 'RealtimeKit could not start the live session')
       }
     }
@@ -750,7 +842,10 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       participant = await media.addParticipant(meetingId, { name: user.displayName, customId: user.id, host })
     }
     catch {
-      if (starting) this.ctx.waitUntil(media.endMeeting(meetingId).catch(() => {}))
+      if (starting) {
+        this.ctx.waitUntil(media.endMeeting(meetingId).catch(() => {}))
+        if (limiter) this.ctx.waitUntil(limiter.giveBack().catch(() => {}))
+      }
       return liveFailure('realtimekit_failed', 'RealtimeKit could not add you to the live session')
     }
 
@@ -794,14 +889,19 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     if (!seat && !live.participantIds.includes(userId)) return live
     // Hanging up ends a Call for both people.
     if (live.kind === 'call' && seat) return this.endLiveNow({})
-    const { [userId]: _seat, ...remainingSeats } = seats
-    const { [userId]: _presence, ...presence } = await this.livePresence()
-    live.participantIds = live.participantIds.filter(id => id !== userId)
-    await this.ctx.storage.put({ livePresence: presence, liveSeats: remainingSeats })
     if (seat) {
       const media = await liveMedia(this.env)
       if (media) this.ctx.waitUntil(media.removeParticipants(live.meetingId, [seat.participantId]).catch(() => {}))
     }
+    return this.vacateLiveSeat(live, userId, seats)
+  }
+
+  /** Forget one person's seat and presence after they left or were removed. */
+  private async vacateLiveSeat(live: LiveState, userId: string, seats: Record<string, { participantId: string }>): Promise<LiveState> {
+    const { [userId]: _seat, ...remainingSeats } = seats
+    const { [userId]: _presence, ...presence } = await this.livePresence()
+    live.participantIds = live.participantIds.filter(id => id !== userId)
+    await this.ctx.storage.put({ livePresence: presence, liveSeats: remainingSeats })
     if (!live.participantIds.length) await this.scheduleCleanup(liveGraceMs(live.kind, await this.isDirectMessage()))
     await this.setLive(live)
     await this.refreshAlarm()
@@ -809,10 +909,15 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     return live
   }
 
+  /**
+   * The room always ends here, even when RealtimeKit cannot be reached or its
+   * meeting is gone. A failed remote end is retried a few times by the alarm.
+   */
   private async endLiveNow(opts: { outcome?: 'declined' | 'unanswered' }): Promise<LiveState> {
     const current = await this.getLive()
-    const media = await liveMedia(this.env)
-    if (current.meetingId && media) await media.endMeeting(current.meetingId)
+    if (current.meetingId && !await this.endMeetingRemotely(current.meetingId)) {
+      await this.retryEndMeeting({ meetingId: current.meetingId, attempts: 1, at: Date.now() + liveEndRetryDelayMs(1) })
+    }
     const live: LiveState = { ...emptyLive(), kind: current.kind }
     await this.setLive(live)
     await this.ctx.storage.delete(['livePresence', 'liveCleanupAt', 'liveSeats', 'liveRingUntil'])
@@ -822,8 +927,50 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     return live
   }
 
+  /** True when the meeting ended or there is no media plane left to end it in. */
+  private async endMeetingRemotely(meetingId: string): Promise<boolean> {
+    try {
+      const media = await liveMedia(this.env)
+      if (media) await media.endMeeting(meetingId)
+      return true
+    }
+    catch (error) {
+      console.warn('live.end_meeting_failed', { channelId: this.channelId(), error: error instanceof Error ? error.message : String(error) })
+      return false
+    }
+  }
+
+  private async liveEndRetries(): Promise<LiveEndRetry[]> {
+    return await this.ctx.storage.get<LiveEndRetry[]>('liveEndRetries') ?? []
+  }
+
+  private async retryEndMeeting(retry: LiveEndRetry) {
+    const retries = (await this.liveEndRetries()).filter(item => item.meetingId !== retry.meetingId)
+    await this.ctx.storage.put('liveEndRetries', [...retries, retry])
+  }
+
+  /** Retry ending remote meetings of rooms that already ended here, with bounded attempts. */
+  private async retryDueMeetingEnds(now: number) {
+    const retries = await this.liveEndRetries()
+    if (!retries.some(item => item.at <= now)) return
+    const remaining: LiveEndRetry[] = []
+    for (const item of retries) {
+      if (item.at > now) {
+        remaining.push(item)
+        continue
+      }
+      if (await this.endMeetingRemotely(item.meetingId)) continue
+      const attempts = item.attempts + 1
+      if (attempts < LIVE_END_RETRY_LIMIT) remaining.push({ ...item, attempts, at: now + liveEndRetryDelayMs(attempts) })
+      else console.warn('live.end_meeting_abandoned', { channelId: this.channelId(), attempts })
+    }
+    if (remaining.length) await this.ctx.storage.put('liveEndRetries', remaining)
+    else await this.ctx.storage.delete('liveEndRetries')
+  }
+
   private async liveAlarm() {
     const now = Date.now()
+    await this.retryDueMeetingEnds(now)
     const live = await this.getLive()
     const ringUntil = await this.ctx.storage.get<number>('liveRingUntil')
     if (live.active && live.ringing && ringUntil && ringUntil <= now) {
@@ -886,14 +1033,15 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
   }
 
   private async loadAuthz(userId: string): Promise<Authz | null> {
+    type Row = { id: string; type: string; visibility: string; parent_id: string | null; archived_at: string | null }
     const ch = await this.env.DB.prepare(
-      'SELECT id, type, visibility, parent_id FROM channels WHERE id = ?',
-    ).bind(this.channelId()).first<{ id: string; type: string; visibility: string; parent_id: string | null }>()
+      'SELECT id, type, visibility, parent_id, archived_at FROM channels WHERE id = ?',
+    ).bind(this.channelId()).first<Row>()
     if (!ch) return null
     const type = ch.type
     let accessRoot = ch
     if (type === 'thread' && ch.parent_id) {
-      const parent = await this.env.DB.prepare('SELECT id, type, visibility, parent_id FROM channels WHERE id = ?').bind(ch.parent_id).first<{ id: string; type: string; visibility: string; parent_id: string | null }>()
+      const parent = await this.env.DB.prepare('SELECT id, type, visibility, parent_id, archived_at FROM channels WHERE id = ?').bind(ch.parent_id).first<Row>()
       if (!parent) return null
       accessRoot = parent
     }
@@ -935,10 +1083,10 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
         const still = await this.env.DB.prepare(
           `SELECT id FROM users WHERE id IN (${placeholders}) AND status = 'active'`,
         ).bind(...ids).all<{ id: string }>()
-        frozen = (still.results ?? []).length !== ids.length
+        frozen = dmFrozen(ids.length, (still.results ?? []).length)
       }
       const perms = directMessagePermissions(membership.perms, membership.ownerId === userId, frozen)
-      return { serverId: (await getServerId(this.env.DB)), type: accessRoot.id === ch.id ? 'dm' : type, perms, ownerId: membership.ownerId, frozen, canManageAgents, mailbox: false }
+      return { serverId: (await getServerId(this.env.DB)), type: accessRoot.id === ch.id ? 'dm' : type, perms, ownerId: membership.ownerId, frozen, canManageAgents, mailbox: false, archived: false }
     }
     let perms = membership.ownerId === userId ? ALL_PERMISSIONS : membership.perms
     if (membership.ownerId !== userId) {
@@ -954,13 +1102,17 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
        WHERE mb.channel_id = ?`,
     ).bind(userId, accessRoot.id).first<{ enabled: number; permission: 'read' | 'send' | 'manage' | null }>()
     if (mailbox) {
-      if (!mailbox.enabled || !mailbox.permission) return null
+      if (!mailbox.enabled || !mailbox.permission || (membership.ownerId !== userId && !hasPermission(membership.perms, Permission.readMail))) return null
       perms &= ~Permission.startLive
-      if (!mailPermissionAllows(mailbox.permission, 'send')) {
+      if (!mailPermissionAllows(mailbox.permission, 'send') || (membership.ownerId !== userId && !hasPermission(membership.perms, Permission.sendMail))) {
         perms &= ~(Permission.sendMessages | Permission.attachFiles)
+      } else {
+        perms |= Permission.sendMessages | Permission.attachFiles
       }
     }
-    return { serverId: (await getServerId(this.env.DB)), type, perms, ownerId: membership.ownerId, frozen: false, canManageAgents, mailbox: Boolean(mailbox) }
+    const archived = accessRoot.type === 'text' && Boolean(accessRoot.archived_at)
+    if (archived) perms &= ~ARCHIVED_CHANNEL_WITHHELD
+    return { serverId: (await getServerId(this.env.DB)), type, perms, ownerId: membership.ownerId, frozen: false, canManageAgents, mailbox: Boolean(mailbox), archived }
   }
 
   private async loadDmParticipants(): Promise<PublicUser[]> {
@@ -975,15 +1127,17 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     return (rows.results ?? []).map((r) => ({ id: r.id, kind: r.kind, displayName: r.display_name, avatarR2Key: r.avatar_r2_key }))
   }
 
-  private async persistMessage(dto: MessageDTO, replyToId: string | null) {
+  private async persistMessage(dto: MessageDTO, replyToId: string | null, roleMentions: RoleMention[] = []) {
     const notification = await messageNotificationStatement(this.env, {
       id: dto.id,
       channelId: dto.channelId,
       author: dto.author,
       content: dto.content,
       mentions: dto.mentions,
+      roleMentions: roleMentions.map(mention => mention.userId),
       attachmentCount: dto.attachments.length,
     })
+    const roleRows = roleMentionStatement(this.env, dto.id, roleMentions)
     const statements = [
       this.env.DB.prepare(
         'INSERT INTO messages (id, channel_id, author_id, content, reply_to_id, edited_at, deleted_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)',
@@ -994,6 +1148,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       ...dto.mentions.map((uid) => this.env.DB.prepare(
         'INSERT OR IGNORE INTO message_mentions (message_id, user_id) VALUES (?, ?)',
       ).bind(dto.id, uid)),
+      ...(roleRows ? [roleRows] : []),
       this.env.DB.prepare(
         `INSERT INTO channel_reads (channel_id, user_id, last_read_message_id, updated_at)
          VALUES (?, ?, ?, ?)
@@ -1064,7 +1219,8 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       avatar_r2_key: string | null
     }>()
     if (!row) return null
-    const mentionRows = await this.env.DB.prepare('SELECT user_id FROM message_mentions WHERE message_id = ?').bind(id).all<{ user_id: string }>()
+    const mentionRows = await this.env.DB.prepare('SELECT user_id FROM message_mentions WHERE message_id = ? AND role_id IS NULL').bind(id).all<{ user_id: string }>()
+    const roleRows = await this.env.DB.prepare('SELECT DISTINCT role_id FROM message_mentions WHERE message_id = ? AND role_id IS NOT NULL').bind(id).all<{ role_id: string }>()
     const attRows = await this.env.DB.prepare(
       'SELECT id, r2_key, filename, content_type, size_bytes, width, height FROM attachments WHERE message_id = ?',
     ).bind(id).all<{
@@ -1095,6 +1251,7 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
       content: row.deleted_at ? '' : row.content,
       replyTo: null,
       mentions: (mentionRows.results ?? []).map((r) => r.user_id),
+      roleMentions: (roleRows.results ?? []).map((r) => r.role_id),
       attachments: (row.deleted_at ? [] : attRows.results ?? []).map((a) => ({
         id: a.id,
         filename: a.filename,
@@ -1152,7 +1309,9 @@ export class ChannelDurableObject extends DurableObject<L4Env> {
     const ringUntil = await this.ctx.storage.get<number>('liveRingUntil')
     const presence = Object.values(await this.livePresence())
     const presenceAt = presence.length ? Math.min(...presence) : undefined
-    const candidates = [cleanupAt, ringUntil, presenceAt]
+    const retries = (await this.liveEndRetries()).map(item => item.at)
+    const retryAt = retries.length ? Math.min(...retries) : undefined
+    const candidates = [cleanupAt, ringUntil, presenceAt, retryAt]
       .filter((value): value is number => typeof value === 'number')
     if (candidates.length) await this.ctx.storage.setAlarm(Math.max(Date.now(), Math.min(...candidates)))
     else await this.ctx.storage.deleteAlarm()

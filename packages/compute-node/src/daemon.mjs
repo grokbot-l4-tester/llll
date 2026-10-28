@@ -5,6 +5,8 @@ import { openNodeState, serverOrigin } from './state-store.mjs'
 
 const state = resolve(process.env.LLLL_NODE_STATE || './compute-node-state')
 const image = process.env.LLLL_WORKSPACE_IMAGE
+const configuredDiskBytes = Number(process.env.LLLL_WORKSPACE_DISK_BYTES || 10737418240)
+if (![1073741824, 10737418240].includes(configuredDiskBytes)) throw new Error('LLLL_WORKSPACE_DISK_BYTES must be 1073741824 or 10737418240')
 if (!/^(?:[a-zA-Z0-9./:_-]+@)?sha256:[a-f0-9]{64}$/u.test(image ?? '')) throw new Error('Set LLLL_WORKSPACE_IMAGE to an immutable registry digest')
 if (process.env.LLLL_SHARED_KERNEL_TRUSTED !== '1') throw new Error('Docker shares the host kernel. Confirm trusted-code use with LLLL_SHARED_KERNEL_TRUSTED=1; public untrusted tenants require a stronger provider')
 process.umask(0o077)
@@ -17,7 +19,7 @@ const probe = new LoopDiskStore(join(state,'probe-disks'),{bytes:33554432,maxDis
 await probe.initialize()
 const probeId = crypto.randomUUID()
 try { await probe.cleanup(); await probe.ensure(probeId,true) } finally { await probe.remove(probeId) }
-const capabilities = { diskBytes:1073741824,docker:true,durableDisk:true,isolation:'shared-kernel',image,maxParallel:1,protocol:1 }
+const capabilities = { ...(process.env.LLLL_COMPUTE_PROVIDER === 'lizard' ? {provider:'lizard'} : {}), diskBytes:configuredDiskBytes,docker:true,durableDisk:true,isolation:'shared-kernel',image,maxParallel:1,protocol:1 }
 const delay = ms => new Promise(resolveDelay => setTimeout(resolveDelay,ms))
 const docker = async (args,options={}) => {
   const result = await runProcess('docker',args,options)
@@ -76,6 +78,11 @@ async function sourceBundle(job,signal) {
 }
 async function execute(job,controller) {
   if (job.serverId!==connection.serverId || job.image!==image || !/^[a-f0-9-]{36}$/u.test(job.workspaceId)) throw new Error('Workspace identity or pinned image mismatch')
+  // Older Servers omit the disk policy and only support 1 GiB. An updated
+  // daemon must keep the paired Node's existing quota and retained disks.
+  const diskBytes = job.diskBytes ?? 1073741824
+  if (![1073741824, 10737418240].includes(diskBytes)) throw new Error('Unsupported workspace disk policy')
+  const taskDisks = new LoopDiskStore(workspaceDisks.root, { bytes: diskBytes })
   const volume=`l4-ws-${job.workspaceId}`,name=`l4-op-${job.id}`,network=`l4-net-${job.id}`,proxy=`l4-proxy-${job.id}`
   const labels=['--label',`l4.node=${connection.nodeId}`,'--label',`l4.server=${connection.serverId}`,'--label',`l4.workspace=${job.workspaceId}`,'--label',`l4.task=${job.taskId}`]
   let source,networkCreated=false
@@ -93,8 +100,8 @@ async function execute(job,controller) {
     try { existing=JSON.parse(await docker(['volume','inspect',volume]))[0] } catch { /* Missing volume only. */ }
     if (existing && (existing.Labels?.['l4.server']!==connection.serverId || existing.Labels?.['l4.node']!==connection.nodeId || existing.Labels?.['l4.workspace']!==job.workspaceId || existing.Labels?.['l4.task']!==job.taskId)) throw new Error('Foreign workspace volume')
     if (!existing && job.request.operation!=='bootstrap') throw new Error('Workspace disk is unavailable on this Node')
-    if (job.request.operation==='release') { if(existing)await docker(['volume','rm',volume]); await workspaceDisks.remove(job.workspaceId); return {ok:true,exitCode:0,output:'Workspace disk explicitly released',runtimeMs:Date.now()-started} }
-    const mountPath=await workspaceDisks.ensure(job.workspaceId,job.request.operation==='bootstrap')
+    if (job.request.operation==='release') { if(existing)await docker(['volume','rm',volume]); await taskDisks.remove(job.workspaceId); return {ok:true,exitCode:0,output:'Workspace disk explicitly released',runtimeMs:Date.now()-started} }
+    const mountPath=await taskDisks.ensure(job.workspaceId,job.request.operation==='bootstrap')
     if(existing && (existing.Driver!=='local'||existing.Options?.device!==mountPath))throw new Error('Workspace volume is not bound to its hard-quota disk')
     if (!existing)await docker(['volume','create',...labels,'--driver','local','--opt','type=none','--opt','o=bind','--opt',`device=${mountPath}`,volume])
     if(job.request.operation==='bootstrap')source=await sourceBundle(job,controller.signal)
@@ -140,7 +147,7 @@ while(!stopping){
     const start=Date.now()
     let result
     try { const job=await poll({operation:'begin',...claim});job.id=claim.id;const limit=setTimeout(()=>controller.abort(),job.executionBudgetMs);try{result=await execute(job,controller)}finally{clearTimeout(limit);await revokeSource(job)} }
-    catch { result={ok:false,exitCode:-1,output:controller.signal.aborted?'Operation stopped after revocation, disconnect or expired lease':'Compute operation failed; inspect limits, source access and Node availability',runtimeMs:Math.min(180000,Date.now()-start)} }
+    catch(error) { result={ok:false,exitCode:-1,output:controller.signal.aborted?'Operation stopped after revocation, disconnect or expired lease':error instanceof Error && error.message==='Compute Node disk is full; free space or move Task storage to a larger disk'?error.message:'Compute operation failed; inspect limits, source access and Node availability',runtimeMs:Math.min(180000,Date.now()-start)} }
     finally {clearInterval(heartbeat);active=undefined}
     const receipt={operation:'result',...claim,result}
     // FULL-synchronous transaction commits before the network callback. If the

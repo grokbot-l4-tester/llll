@@ -2,12 +2,13 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import type { InfiniteData } from '@tanstack/vue-query'
 import type { ContextMenuItem, DropdownMenuItem } from '@nuxt/ui'
-import type { ChannelThreadDTO, MemberDTO, MessageContextResponse, MessageDTO, MessagePinDTO, MessageSearchHitDTO, MessageSearchResponse } from '~~/shared/types'
+import type { ChannelThreadDTO, MemberDTO, MessageContextResponse, MessageDTO, MessagePinDTO, MessageSearchHitDTO, MessageSearchResponse, TaskSourceLinkDTO } from '~~/shared/types'
 import { formatDayLabel, formatFullDateTime, formatMessageTime, sameDay } from '~~/shared/format'
-import { applyMentionTokens, extractMentionIds, humanizeMentions } from '~~/shared/mentions'
+import { applyMentionTokens, extractMentionIds, humanizeMentions, mentionRoles, roleDisplayName } from '~~/shared/mentions'
 import { replaceShortcodes } from '~~/shared/emoji'
 import { channelPath } from '~~/shared/paths'
 import { nowIso } from '~~/shared/ids'
+import { Permission } from '~~/shared/permissions'
 import { mergeMessageContext, type MessagePage } from '~/utils/message-cache'
 import { applyReactionChange } from '~/utils/message-reactions'
 import { useVirtualizer } from '@tanstack/vue-virtual'
@@ -19,11 +20,17 @@ const props = withDefaults(defineProps<{
   channelName?: string
   isDm?: boolean
   canPin?: boolean
+  /** Manage channels here: delete other people's messages. */
+  canModerate?: boolean
   showIntro?: boolean
   /** Threads cannot hold threads of their own. */
   allowThreads?: boolean
   /** The app path a copied message link opens, before `?message=`. */
   linkPath?: string
+  /** Offer Create task on messages (Create and update tasks somewhere in the Server). */
+  canCreateTasks?: boolean
+  /** An archived conversation: history only. Existing threads still open; nothing new is added. */
+  readOnly?: boolean
 }>(), { channelName: undefined, linkPath: undefined, showIntro: true, allowThreads: true })
 const { api } = useApi()
 const emit = defineEmits<{
@@ -54,6 +61,18 @@ type MessageResponse = MessagePage & {
 }
 
 const messagesKey = computed(() => ['messages', props.channelId] as const)
+
+/** Tasks created from messages here, shown under their message. Only Tasks the viewer can read are returned. */
+const taskLinksQ = useQuery({
+  queryKey: computed(() => ['task-links', props.channelId]),
+  queryFn: () => api<{ links: TaskSourceLinkDTO[] }>(`/api/channels/${props.channelId}/task-links`),
+  staleTime: 60_000,
+})
+const taskLinksByMessage = computed(() => {
+  const map = new Map<string, TaskSourceLinkDTO[]>()
+  for (const link of taskLinksQ.data.value?.links ?? []) map.set(link.messageId, [...(map.get(link.messageId) ?? []), link])
+  return map
+})
 
 const q = useInfiniteQuery({
   queryKey: messagesKey,
@@ -126,13 +145,25 @@ const searchReady = computed(() => ownsSearch.value
   && searchSettled.value
   && hasSearchableTerm.value)
 
+const { serverId } = useServer()
+const serverSearch = computed(() => ui.searchScope === 'server' && Boolean(serverId.value))
+const searchScopes = [
+  { label: 'This conversation', value: 'conversation' },
+  { label: 'Whole server', value: 'server' },
+]
 const searchQ = useInfiniteQuery({
-  queryKey: computed(() => ['message-search', props.channelId, searchTerm.value]),
+  // Server-wide results span conversations whose access can change, so they are never cached.
+  queryKey: computed(() => serverSearch.value
+    ? ['message-search', 'server', serverId.value, searchTerm.value]
+    : ['message-search', props.channelId, searchTerm.value]),
   initialPageParam: undefined as string | undefined,
-  queryFn: ({ pageParam }) => api<MessageSearchResponse>(`/api/channels/${props.channelId}/search`, {
+  queryFn: ({ pageParam }) => api<MessageSearchResponse>(serverSearch.value
+    ? `/api/servers/${serverId.value}/search`
+    : `/api/channels/${props.channelId}/search`, {
     query: { q: searchTerm.value, cursor: pageParam, limit: 20 },
   }),
   getNextPageParam: last => last.nextCursor ?? undefined,
+  gcTime: computed(() => serverSearch.value ? 0 : 5 * 60 * 1000),
   enabled: searchReady,
 })
 
@@ -152,11 +183,16 @@ const searchEmpty = computed(() => Boolean(
 
 const names = computed(() => {
   const map: Record<string, string> = {}
-  for (const m of props.members) map[m.user.id] = m.nickname || m.user.displayName
+  for (const m of props.members) {
+    map[m.user.id] = m.nickname || m.user.displayName
+    map[`&${m.role.id}`] = roleDisplayName(m.role)
+  }
   return map
 })
 const membersById = computed(() => new Map(props.members.map(member => [member.user.id, member])))
 const mentionables = computed(() => props.members.map(m => ({ id: m.user.id, displayName: m.user.displayName, nickname: m.nickname })))
+const viewer = usePermissions(() => props.members)
+const roleMentionables = computed(() => mentionRoles(props.members, viewer.can(Permission.manageChannels)))
 const editingId = computed(() => ui.composerState(props.channelId).editingId)
 
 function compactWith(curr: MessageDTO, prev?: MessageDTO) {
@@ -171,7 +207,8 @@ function compactWith(curr: MessageDTO, prev?: MessageDTO) {
 function mentionsMe(message: MessageDTO) {
   const me = session.user?.id
   if (!me || message.author.id === me) return false
-  return message.mentions.includes(me) || message.replyTo?.authorId === me
+  const role = viewer.mine.value?.role.id
+  return message.mentions.includes(me) || Boolean(role && message.roleMentions?.includes(role)) || message.replyTo?.authorId === me
 }
 
 /* ------------------------------------------------------------------ scrolling */
@@ -371,7 +408,7 @@ function startEdit(message: MessageDTO) {
 
 async function saveEdit(message: MessageDTO) {
   const draft = ui.composerState(props.channelId).editDraft
-  const content = replaceShortcodes(applyMentionTokens(draft, mentionables.value)).trim()
+  const content = replaceShortcodes(applyMentionTokens(draft, mentionables.value, roleMentionables.value)).trim()
   if (!content && !message.attachments.length) {
     // An emptied message is a delete, as in Discord; ask first.
     ui.cancelEditing(props.channelId)
@@ -413,27 +450,36 @@ function quickReactions() {
   return [...new Set([...recent, ...QUICK_REACTIONS])].slice(0, 10)
 }
 
+/** Archived history keeps its existing threads open but adds no new ones or pins. */
+const canPinHere = computed(() => props.canPin && !props.readOnly)
+function canThread(message: MessageDTO) {
+  return props.allowThreads && (!props.readOnly || Boolean(message.threadId))
+}
+
 function actionsFor(message: MessageDTO): DropdownMenuItem[][] {
   const mine = message.author.id === session.user?.id
-  const main: DropdownMenuItem[] = [
+  const main: DropdownMenuItem[] = props.readOnly ? [] : [
     {
       label: 'Add reaction',
       icon: 'i-ph-smiley-sticker',
       children: [quickReactions().map(emoji => ({ label: emoji, onSelect: () => { prefs.useEmoji(emoji); void react(message.id, emoji) } }))],
     },
   ]
-  if (mine) main.push({ label: 'Edit message', icon: 'i-ph-pencil-simple', onSelect: () => startEdit(message) })
-  main.push({ label: 'Reply', icon: 'i-ph-arrow-bend-up-left', onSelect: () => emit('reply', message.id) })
-  if (props.allowThreads) {
+  if (mine && !props.readOnly) main.push({ label: 'Edit message', icon: 'i-ph-pencil-simple', onSelect: () => startEdit(message) })
+  if (!props.readOnly) main.push({ label: 'Reply', icon: 'i-ph-arrow-bend-up-left', onSelect: () => emit('reply', message.id) })
+  if (canThread(message)) {
     main.push({ label: message.threadId ? 'Open thread' : 'Create thread', icon: 'i-ph-chats', onSelect: () => emit('thread', message) })
   }
-  if (props.canPin) main.push({ label: message.pin ? 'Unpin message' : 'Pin message', icon: 'i-ph-push-pin', onSelect: () => { void togglePin(message) } })
+  if (canPinHere.value) main.push({ label: message.pin ? 'Unpin message' : 'Pin message', icon: 'i-ph-push-pin', onSelect: () => { void togglePin(message) } })
+  if (props.canCreateTasks && !message.deletedAt && !message.id.startsWith('tmp:')) {
+    main.push({ label: 'Create task', icon: 'i-ph-kanban', onSelect: () => { void navigateTo({ path: '/tasks', query: { fromMessage: message.id } }) } })
+  }
   const copyItems: DropdownMenuItem[] = []
   if (message.content.trim()) copyItems.push({ label: 'Copy text', icon: 'i-ph-copy', onSelect: () => { void copy(message.content, 'Text') } })
   copyItems.push({ label: 'Copy message link', icon: 'i-ph-link', onSelect: () => { void copy(messageLink(message), 'Link') } })
   copyItems.push({ label: 'Copy message ID', icon: 'i-ph-identification-badge', onSelect: () => { void copy(message.id, 'ID') } })
   const groups = [main, copyItems]
-  if (mine) groups.push([{ label: 'Delete message', icon: 'i-ph-trash', color: 'error', onSelect: () => remove(message.id) }])
+  if (mine || props.canModerate) groups.push([{ label: 'Delete message', icon: 'i-ph-trash', color: 'error', onSelect: () => remove(message.id) }])
   return groups
 }
 
@@ -521,11 +567,11 @@ function onRowKey(event: KeyboardEvent) {
     event.preventDefault()
     focusRow(messages.value[index + (key === 'arrowup' ? -1 : 1)]?.id)
   }
-  else if (key === 'e' && mine) { event.preventDefault(); startEdit(message) }
-  else if (key === 'r') { event.preventDefault(); emit('reply', message.id) }
-  else if (key === 't' && props.allowThreads) { event.preventDefault(); emit('thread', message) }
-  else if (key === 'p' && props.canPin) { event.preventDefault(); void togglePin(message) }
-  else if ((key === 'delete' || key === 'backspace') && mine) { event.preventDefault(); remove(message.id, event.shiftKey) }
+  else if (key === 'e' && mine && !props.readOnly) { event.preventDefault(); startEdit(message) }
+  else if (key === 'r' && !props.readOnly) { event.preventDefault(); emit('reply', message.id) }
+  else if (key === 't' && canThread(message)) { event.preventDefault(); emit('thread', message) }
+  else if (key === 'p' && canPinHere.value) { event.preventDefault(); void togglePin(message) }
+  else if ((key === 'delete' || key === 'backspace') && (mine || props.canModerate)) { event.preventDefault(); remove(message.id, event.shiftKey) }
 }
 
 /* ------------------------------------------------------------------ jumping */
@@ -568,8 +614,7 @@ async function focusMessage(id: string) {
 async function goToResult(hit: MessageSearchHitDTO) {
   ui.searchOpen = false
   if (hit.channel.id !== props.channelId) {
-    const path = hit.channel.parentId ? channelPath(hit.channel.parentId, hit.channel.id) : channelPath(hit.channel.id)
-    await navigateTo(`${path}?message=${hit.id}`)
+    await navigateTo(`${hit.channel.path}?message=${encodeURIComponent(hit.id)}`)
     return
   }
   await focusMessage(hit.id)
@@ -655,11 +700,13 @@ defineExpose({ focusMessage })
               :message="m"
               :context-only="m.channelId !== channelId"
               :thread="threadsByMessage.get(m.id)"
+              :task-links="taskLinksByMessage.get(m.id)"
               :names="names"
               :member="membersById.get(m.author.id)"
               :mine="m.author.id === session.user?.id"
-              :can-pin="canPin"
-              :can-thread="allowThreads"
+              :can-pin="canPinHere"
+              :can-thread="canThread(m)"
+              :read-only="readOnly"
               :compact="unreadBoundary !== m.id && messages[i - 1]?.channelId === m.channelId && compactWith(m, messages[i - 1])"
               :streaming="streamingMessageIds.has(m.id)"
               :active="activeId === m.id"
@@ -672,7 +719,7 @@ defineExpose({ focusMessage })
               @save-edit="saveEdit(m)"
               @cancel-edit="ui.cancelEditing(channelId)"
               @remove="(immediate) => remove(m.id, immediate)"
-              @thread="allowThreads && emit('thread', m)"
+              @thread="canThread(m) && emit('thread', m)"
               @jump="focusMessage"
               @react="(emoji) => react(m.id, emoji)"
               @pin="togglePin(m)"
@@ -710,10 +757,11 @@ defineExpose({ focusMessage })
             v-model="ui.searchQuery"
             icon="i-ph-magnifying-glass"
             size="xl"
-            placeholder="Search messages"
+            :placeholder="ui.searchScope === 'server' ? 'Search all conversations' : 'Search this conversation'"
             autofocus
             class="w-full"
           />
+          <UTabs v-model="ui.searchScope" :items="searchScopes" :content="false" size="xs" variant="link" class="mt-2" />
           <div v-if="ui.searchQuery.trim()" class="mt-2 max-h-96 overflow-y-auto">
             <div v-if="searchLoading" class="p-3">
               <LayoutSkeleton variant="rows" :rows="3" />
@@ -732,6 +780,10 @@ defineExpose({ focusMessage })
                 <span class="min-w-0 flex-1">
                   <span class="flex items-center gap-2 text-xs">
                     <strong class="truncate text-highlighted">{{ message.author.displayName }}</strong>
+                    <span v-if="message.channel.id !== channelId" class="flex min-w-0 items-center gap-1 text-muted">
+                      <UIcon :name="message.channel.type === 'thread' ? 'i-ph-chat-circle-text' : message.channel.type === 'dm' ? 'i-ph-user' : 'i-ph-hash'" class="size-3 shrink-0" />
+                      <span class="truncate">{{ message.channel.type === 'thread' ? `${message.channel.title} › ${message.channel.name}` : message.channel.title }}</span>
+                    </span>
                     <time class="shrink-0 text-muted">{{ formatMessageTime(message.createdAt) }}</time>
                   </span>
                   <span class="block truncate text-sm text-muted">{{ humanizeMentions(message.content, names) }}</span>
@@ -769,7 +821,7 @@ defineExpose({ focusMessage })
     <UDrawer v-model:open="sheetOpen" :title="sheetMessage ? `Message from ${sheetMessage.author.displayName}` : 'Message'" :ui="{ title: 'sr-only', header: 'hidden' }">
       <template #body>
         <div v-if="sheetMessage" class="space-y-3">
-          <div class="flex justify-between gap-1">
+          <div v-if="!readOnly" class="flex justify-between gap-1">
             <button
               v-for="e in quickReactions().slice(0, 6)"
               :key="e"

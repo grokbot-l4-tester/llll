@@ -291,6 +291,7 @@ export const roles = sqliteTable('roles', {
   resourceAccessJson: text('resource_access_json').notNull().default('{}'),
   position: integer('position').notNull().default(0),
   isSystem: integer('is_system', { mode: 'boolean' }).notNull().default(false),
+  mentionable: integer('mentionable', { mode: 'boolean' }).notNull().default(false),
   ...isoTimestamps(),
 })
 
@@ -324,6 +325,9 @@ export const agents = sqliteTable('agents', {
   status: text('status', { enum: ['active', 'paused'] }).notNull().default('active'),
   createdBy: text('created_by').notNull().references(() => users.id),
   lastActiveAt: text('last_active_at'),
+  /** Set when the Agent is deleted. The profile row stays for history. */
+  archivedAt: text('archived_at'),
+  archivedBy: text('archived_by'),
   ...isoTimestamps(),
 }, table => [
   index('agents_status_idx').on(table.status),
@@ -352,7 +356,7 @@ export const agentTurns = sqliteTable('agent_turns', {
 export const serverSchema = sqliteTable('server_schema', {
   id: integer('id').primaryKey().default(1),
   version: text('version').notNull(),
-}, table => [check('server_schema_id_check', sql`${table.id} = 1`), check('server_schema_version_check', sql`${table.version} = 'server-v1'`)])
+}, table => [check('server_schema_id_check', sql`${table.id} = 1`), check('server_schema_version_check', sql`${table.version} = 'server-v2'`)])
 
 /** Private update journal; membership and Server content remain independent. */
 export const serverUpdateControl = sqliteTable('server_update_control', {
@@ -487,8 +491,13 @@ export const channels = sqliteTable('channels', {
   /** Legacy metadata retained for forward-compatible migration of existing conversations. */
   dmKind: text('dm_kind', { enum: ['pair', 'group'] }).notNull().default('pair'),
   dmOwnerId: text('dm_owner_id').references(() => users.id, { onDelete: 'set null' }),
+  /** Ordered `low:high` participant IDs of a 1:1 DM; unique, so a pair never gets two DMs. */
+  dmPairKey: text('dm_pair_key'),
   /** The active Live room's RealtimeKit meeting. */
   liveMeetingId: text('live_meeting_id'),
+  /** Set on an archived root text channel: readable history, no new activity, hidden from Chat. */
+  archivedAt: text('archived_at'),
+  archivedBy: text('archived_by').references(() => users.id, { onDelete: 'set null' }),
   parentId: text('parent_id').references((): AnySQLiteColumn => channels.id, { onDelete: 'cascade' }),
   parentMessageId: text('parent_message_id').references((): AnySQLiteColumn => messages.id, { onDelete: 'cascade' }),
   ...isoTimestamps(),
@@ -498,6 +507,7 @@ export const channels = sqliteTable('channels', {
   index('channels_category_id_idx').on(table.categoryId),
   index('channels_parent_id_idx').on(table.parentId),
   uniqueIndex('channels_thread_root_unique').on(table.parentMessageId).where(sql`${table.type} = 'thread'`),
+  uniqueIndex('channels_dm_pair_key_unique').on(table.dmPairKey).where(sql`${table.dmPairKey} is not null`),
   check('channels_type_check', sql`${table.type} in ('text', 'thread', 'dm')`),
   check('channels_visibility_check', sql`${table.visibility} in ('server', 'private')`),
   check('channels_dm_private_check', sql`${table.type} <> 'dm' or ${table.visibility} = 'private'`),
@@ -545,6 +555,7 @@ export const messages = sqliteTable('messages', {
 }, table => [
   index('messages_channel_created_idx').on(table.channelId, table.createdAt, table.id),
   index('messages_author_id_idx').on(table.authorId),
+  index('messages_live_channel_id_idx').on(table.channelId, table.id).where(sql`${table.deletedAt} is null`),
 ])
 
 export const channelReads = sqliteTable('channel_reads', {
@@ -610,6 +621,8 @@ export const messagePins = sqliteTable('message_pins', {
 export const messageMentions = sqliteTable('message_mentions', {
   messageId: text('message_id').notNull().references(() => messages.id, { onDelete: 'cascade' }),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  /** The Role this mention reached the Member through; null for a direct mention. */
+  roleId: text('role_id'),
 }, table => [
   primaryKey({ columns: [table.messageId, table.userId] }),
   index('message_mentions_user_id_idx').on(table.userId),
@@ -632,7 +645,7 @@ export const notificationOutbox = sqliteTable('notification_outbox', {
   eventId: text('event_id').notNull(),
   subscriptionId: text('subscription_id').notNull().references(() => pushSubscriptions.id, { onDelete: 'cascade' }),
   recipientId: text('recipient_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  kind: text('kind', { enum: ['mention', 'dm_message', 'live_started'] }).notNull(),
+  kind: text('kind', { enum: ['mention', 'dm_message', 'live_started', 'mail'] }).notNull(),
   channelId: text('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
   payloadJson: text('payload_json').notNull(),
   attempts: integer('attempts').notNull().default(0),
@@ -646,7 +659,7 @@ export const notificationOutbox = sqliteTable('notification_outbox', {
 }, table => [
   primaryKey({ columns: [table.eventId, table.subscriptionId] }),
   index('notification_outbox_due_idx').on(table.availableAt).where(sql`${table.deliveredAt} is null and ${table.failedAt} is null`),
-  check('notification_outbox_kind_check', sql`${table.kind} in ('mention', 'dm_message', 'live_started')`),
+  check('notification_outbox_kind_check', sql`${table.kind} in ('mention', 'dm_message', 'live_started', 'mail')`),
 ])
 
 /** Cloudflare-managed mail domains attached to this single-server server. */
@@ -1006,6 +1019,22 @@ export const projectRepositories = sqliteTable('project_repositories', {
   createdBy: text('created_by').notNull().references(() => users.id), createdAt: text('created_at').notNull(),
 }, table => [uniqueIndex('project_repository_identity').on(table.projectId, table.provider, table.host, table.externalId)])
 
+export const projectPolicies = sqliteTable('project_policies', {
+  id: text('id').primaryKey(), name: text('name').notNull().unique(), description: text('description').notNull().default(''),
+  permissionsBitmask: integer('permissions_bitmask').notNull(), version: integer('version').notNull().default(1),
+  createdBy: text('created_by').references(() => users.id), ...isoTimestamps(),
+})
+export const projectPolicyAssignments = sqliteTable('project_policy_assignments', {
+  id: text('id').primaryKey(), projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  policyId: text('policy_id').notNull().references(() => projectPolicies.id, { onDelete: 'cascade' }),
+  memberId: text('member_id').references(() => users.id, { onDelete: 'cascade' }), roleId: text('role_id').references(() => roles.id, { onDelete: 'cascade' }),
+  createdBy: text('created_by').notNull().references(() => users.id), createdAt: text('created_at').notNull(),
+}, table => [
+  check('project_policy_target', sql`(${table.memberId} IS NOT NULL AND ${table.roleId} IS NULL) OR (${table.roleId} IS NOT NULL AND ${table.memberId} IS NULL)`),
+  uniqueIndex('project_policy_members').on(table.projectId, table.policyId, table.memberId).where(sql`${table.memberId} IS NOT NULL`),
+  uniqueIndex('project_policy_roles').on(table.projectId, table.policyId, table.roleId).where(sql`${table.roleId} IS NOT NULL`),
+])
+
 export const tasks = sqliteTable('tasks', {
   projectId: text('project_id').references(() => projects.id),
   id: text('id').primaryKey(),
@@ -1027,10 +1056,14 @@ export const tasks = sqliteTable('tasks', {
   resultDetails: text('result_details'),
   lastError: text('last_error'),
   archivedAt: text('archived_at'),
+  /** The chat message this task was created from. No foreign key: the task outlives the message. */
+  sourceChannelId: text('source_channel_id'),
+  sourceMessageId: text('source_message_id'),
   ...isoTimestamps(),
 }, table => [
   index('tasks_board_status_position_idx').on(table.boardId, table.status, table.position),
   index('tasks_assignee_id_idx').on(table.assigneeId),
+  index('tasks_source_message_idx').on(table.sourceChannelId, table.sourceMessageId).where(sql`${table.sourceMessageId} IS NOT NULL`),
   uniqueIndex('tasks_discussion_channel_unique').on(table.discussionChannelId).where(sql`${table.discussionChannelId} is not null`),
   check('tasks_status_check', sql`${table.status} in ('backlog', 'ready', 'review', 'done', 'failed')`),
   check('tasks_priority_check', sql`${table.priority} in ('low', 'normal', 'high', 'urgent')`),
@@ -1122,6 +1155,8 @@ export const mcpOutboundConnections = sqliteTable('mcp_outbound_connections', {
 }, table => [index('mcp_outbound_server_owner').on(table.serverId, table.ownerId), check('mcp_outbound_enabled', sql`${table.enabled} IN (0,1)`)])
 
 export const schema = {
+  projectPolicies,
+  projectPolicyAssignments,
   mcpOutboundConnections,
   fileDeletions,
   serverSchema,

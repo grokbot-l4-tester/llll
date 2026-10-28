@@ -26,6 +26,25 @@ Preserve existing implementations while stabilizing the community core and opera
 
 Agents have the Server's local permission boundary. Their current scope is conversation and authorized tools, not a computer, shell or repository worker. External email sending requires human approval. Mail delivery needs its own Provider configuration. Neither Mail nor Agents is required for the first community conversation.
 
+## Inbox
+
+Inbox is the first rail section and the one place to catch up. It lists only what needs the signed-in Member, each with one next step:
+
+- **Approvals:** pending review-mode workspace actions and sharing reviews from Runs they started.
+- **Mentions:** unread messages that mention them, directly or through their Role, in conversations they can still open.
+- **Agent work:** their Runs while queued or running and for three days after, with the draft pull request when one was opened.
+- **My tasks:** Tasks assigned to them, and Tasks they created that wait for review.
+- **Mail:** Mailboxes they can read with unread mail.
+- **Unread chats:** unread Channels, Direct Messages and Agent chats. A row opens the unread thread when only thread replies are new, and can be marked read without opening it.
+
+The rail badge counts approvals and mentions only, so standing work does not keep it lit. Unread mail is listed per Mailbox; individual Email Conversations stay in Mail.
+
+Mail sends a push notification for each new email that lands in a Mailbox's Inbox to every human who holds a grant on that Mailbox and Read or Send email (or is the Owner); the grant is checked again at delivery. Mail filed as Spam or Trash stays quiet. Each Mail folder can be searched by subject, address, sender name and the text of emails and internal notes. New emails and replies support Cc and Bcc (Bcc stays out of the conversation's participants), and Forward opens a new email quoting the original. Forwarding does not copy attachments; outbound attachments, HTML composition, drafts and signatures are not supported yet.
+
+A role mention (`@Role`, stored as `<@&roleId>`) notifies the people with that Role who can read the conversation, up to 500 of them; it never invokes an Agent, which takes a direct mention. Anyone may mention a Role whose settings allow mentions; the Owner and Members with **Manage channels** may mention any Role. Elsewhere the mention stays in the text and notifies nobody. A role mention in a Direct Message or a task discussion adds no recipients. Editing a message notifies only the people a new mention reaches.
+
+Messages in Channels, Direct Messages and Threads offer **Create task**. It opens the Task form prefilled from the message, and the saved Task links back to it. The message then shows the Task to anyone who can read that Task; people who cannot read the source conversation see only that the Task came from a message. Deleting the message keeps the Task and shows the source as deleted.
+
 ## Deployment boundary
 
 The normal topology is an independent Server with an optional Shell. Site, Shell and installer deploy independently; they are not mandatory infrastructure for customer content or identity. The root Nuxt runtime is one Server; the Server owns local identity and routing. See [the architecture decision](adr/0003-server-schema-lineage.md).
