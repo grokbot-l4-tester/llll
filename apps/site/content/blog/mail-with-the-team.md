@@ -1,7 +1,7 @@
 ---
 title: A shared Mailbox inside your Server
 description: How a team can handle email alongside its work while keeping Mailbox access explicit.
-date: 2026-10-29
+date: 2026-10-09
 author: Inchi
 ---
 
