@@ -1,7 +1,7 @@
 ---
 title: A backup is not a second running Server
 description: What an independent workspace needs to recover, and why its backup destination is separate from live files.
-date: 2026-10-11
+date: 2026-10-21
 author: Inchi
 ---
 

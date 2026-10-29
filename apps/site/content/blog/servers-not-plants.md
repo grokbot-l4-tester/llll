@@ -1,7 +1,7 @@
 ---
 title: A Server is like a houseplant, except the houseplant doesn't have a database
 description: Independent workspaces need care. A practical guide for people who have already killed one succulent.
-date: 2026-10-13
+date: 2026-10-24
 author: Inchi
 ---
 

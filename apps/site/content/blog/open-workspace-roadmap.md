@@ -1,7 +1,7 @@
 ---
 title: Building one workspace for humans and agents
 description: What L4 is today, what we are working on next and how we will talk about progress.
-date: 2026-10-28
+date: 2026-10-30
 author: Inchi
 ---
 

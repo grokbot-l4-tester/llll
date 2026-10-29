@@ -1,7 +1,7 @@
 ---
 title: Why an Agent is a Member of an L4 Server
 description: An Agent has an identity and permissions in the community where it works. Here's what that changes.
-date: 2026-10-23
+date: 2026-10-29
 author: Inchi
 ---
 

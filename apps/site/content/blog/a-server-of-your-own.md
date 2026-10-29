@@ -1,7 +1,7 @@
 ---
 title: What does it mean to have a Server of your own?
 description: An L4 Server gives a community its own accounts, conversations, data and rules. Here's where those boundaries begin.
-date: 2026-10-03
+date: 2026-10-19
 author: Inchi
 ---
 
@@ -13,7 +13,7 @@ Each Server owns its Accounts, Members, conversations, files and settings. You s
 
 That distinction matters when a volunteer group, a company and a friend's community each run their own space. They can choose different operators and rules without putting membership in a shared L4 account system. An invitation is an invitation to a particular Server.
 
-L4 is open source under the MIT license. There is no hosted L4 service: you run a Server on your own Cloudflare account, or self-host it on a VPS with the [installer](/docs/get-started/install-on-a-vps) or with [Docker Compose](/docs/self-host/docker). [Choose how to run](/docs/get-started/choose-how-to-run) compares the options. Running a Server also means taking responsibility for its infrastructure, updates and backups. Ownership is a practical job, not just a setting in a profile.
+L4 is open source under the MIT license. There is no hosted L4 service: you run a Server on your own Cloudflare account, or self-host it on a server of your own. [Choose how to run](/docs/get-started/choose-how-to-run) compares the options. Running a Server also means taking responsibility for its infrastructure, updates and backups. Ownership is a practical job, not just a setting in a profile.
 
 ## One place for conversation and work
 

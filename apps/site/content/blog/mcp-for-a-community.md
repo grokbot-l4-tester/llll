@@ -1,7 +1,7 @@
 ---
 title: What an MCP connection to your Server can do
 description: Connect a client to L4 with a local identity, explicit scopes and permissions that remain under the Server's control.
-date: 2026-10-14
+date: 2026-10-29
 author: Inchi
 ---
 

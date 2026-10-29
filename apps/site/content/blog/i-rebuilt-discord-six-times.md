@@ -1,7 +1,7 @@
 ---
 title: I built an open-source Discord alternative six times. Surely this one is different.
 description: A personal history of chat apps, changing architectures, increasingly ambitious names and the suspiciously persistent urge to build one more Server.
-date: 2026-10-22
+date: 2026-10-18
 author: Inchi
 ---
 

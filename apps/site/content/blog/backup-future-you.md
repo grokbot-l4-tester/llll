@@ -1,7 +1,7 @@
 ---
 title: A backup is a love letter to future you
 description: Future you is having a very bad morning. Present you can help by testing a restore.
-date: 2026-10-12
+date: 2026-10-22
 author: Inchi
 ---
 

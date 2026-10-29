@@ -1,7 +1,7 @@
 ---
 title: Slack shouldn't get to put an expiration date on your team's memory
 description: Slack Free hides older conversations and deletes old data. An independent Server starts with a different question: who decides what your community keeps?
-date: 2026-10-16
+date: 2026-10-30
 author: Inchi
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: The annual workspace cleanup nobody put on the calendar
 description: Five small questions for the tabs, permissions and conversations your team has accumulated.
-date: 2026-10-19
+date: 2026-10-28
 author: Inchi
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: An AI agent's first day at work
 description: Meet the newest Member of your Server. Please do not give it the keys to everything on day one.
-date: 2026-10-24
+date: 2026-10-29
 author: Inchi
 ---
 

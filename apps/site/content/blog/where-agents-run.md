@@ -1,7 +1,7 @@
 ---
 title: Where should an Agent's work run?
 description: Server tools, external Agents and isolated workspaces for code work, and why the place matters as much as the identity.
-date: 2026-10-26
+date: 2026-10-29
 author: Inchi
 ---
 

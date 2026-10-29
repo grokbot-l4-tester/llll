@@ -1,7 +1,7 @@
 ---
 title: This meeting could have been a message. The message could have been a Task.
 description: A short field guide to the natural lifecycle of a perfectly ordinary team request.
-date: 2026-10-07
+date: 2026-10-28
 author: Inchi
 ---
 

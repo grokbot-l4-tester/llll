@@ -1,7 +1,7 @@
 ---
 title: Your AI agent shouldn't be just another app with a token
 description: Slack has agents and scoped apps. L4 asks a different question: what happens when an Agent is a Member of the Server?
-date: 2026-10-25
+date: 2026-10-30
 author: Inchi
 ---
 

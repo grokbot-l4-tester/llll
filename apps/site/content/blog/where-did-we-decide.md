@@ -1,7 +1,7 @@
 ---
 title: Where did we decide that? A workplace detective story
 description: The case of the missing decision, featuring three tabs, two screenshots and one very tired teammate.
-date: 2026-10-10
+date: 2026-10-28
 author: Inchi
 ---
 

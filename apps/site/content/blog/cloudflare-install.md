@@ -1,7 +1,7 @@
 ---
 title: How an L4 Server gets installed on Cloudflare
 description: A look at the published release, resources and owner setup behind the Cloudflare installer.
-date: 2026-10-27
+date: 2026-10-29
 author: Inchi
 ---
 

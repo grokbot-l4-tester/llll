@@ -1,7 +1,7 @@
 ---
 title: Slack plus Notion is not a workspace. It's a reconciliation job.
 description: Conversations in one service and tasks in another can work. They also leave teams maintaining the connection between the two.
-date: 2026-10-17
+date: 2026-10-30
 author: Inchi
 ---
 

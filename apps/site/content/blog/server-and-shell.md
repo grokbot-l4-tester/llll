@@ -1,7 +1,7 @@
 ---
 title: Server and Shell: why your workspace has two addresses
 description: How L4 keeps navigation across Servers separate from each community's identity and permissions.
-date: 2026-10-04
+date: 2026-10-20
 author: Inchi
 ---
 

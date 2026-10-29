@@ -1,7 +1,7 @@
 ---
 title: I asked an agent to fix everything. It had a few questions.
 description: A comedy in three acts about scope, permissions and the phrase “just deploy it.”
-date: 2026-10-15
+date: 2026-10-26
 author: Inchi
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: Your workspace stack has a landlord problem
 description: Slack, Notion and hosted tools make work convenient. They also make their operators' decisions part of your operating model.
-date: 2026-10-21
+date: 2026-10-30
 author: Inchi
 ---
 

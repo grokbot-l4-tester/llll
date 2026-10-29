@@ -1,7 +1,7 @@
 ---
 title: A Discord server is not your server
 description: Discord gives communities a place to gather. L4 explores what changes when a community also operates its own workspace.
-date: 2026-10-20
+date: 2026-10-30
 author: Inchi
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: Notion export is useful. It isn't ownership of your workspace.
 description: A ZIP of Markdown and CSV is a start. A workspace you can operate and recover is a different promise.
-date: 2026-10-18
+date: 2026-10-30
 author: Inchi
 ---
 
