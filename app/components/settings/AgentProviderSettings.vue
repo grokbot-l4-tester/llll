@@ -16,10 +16,22 @@ const modelSearch = ref('')
 const catalog = useQuery({ queryKey: computed(() => ['agent-providers', props.serverId, query.value, page.value]), queryFn: () => api<{ providers: AgentProviderDTO[]; total: number }>(`/api/servers/${props.serverId}/agent-providers/connections`, { query: { search: query.value, page: page.value } }) })
 const modelOptions = useQuery({ queryKey: computed(() => ['agent-provider-model-options', props.serverId, modelSearch.value]), queryFn: () => api<{ models: import('~~/shared/agent-providers').AgentModelOption[]; defaultModel: string | null; deploymentProvider?: string | null }>(`/api/servers/${props.serverId}/agent-providers/model-options`, { query: { search: modelSearch.value } }) })
 const connecting = useQuery({ queryKey: computed(() => ['agent-provider-connecting', props.serverId, editing.value?.id]), queryFn: () => api<{ provider: AgentProviderDTO }>(`/api/servers/${props.serverId}/agent-providers/${editing.value!.id}`), enabled: computed(() => Boolean(connection.value && editing.value)), refetchInterval: 2000 })
-const kinds = agentProviderIds.map(value => ({ value, label: providerNames[value] }))
+const providerCards: Record<AgentProviderId, { icon: string; description: string }> = {
+  openrouter: { icon: 'i-ph-shuffle', description: 'Hundreds of models with one API key' },
+  anthropic: { icon: 'i-ph-asterisk', description: 'Claude models with an Anthropic API key' },
+  chatgpt: { icon: 'i-ph-open-ai-logo', description: 'Your ChatGPT plan, for your own requests' },
+}
+const kinds = agentProviderIds.map(value => ({ value, label: providerNames[value], ...providerCards[value] }))
 const visible = computed(() => catalog.data.value?.providers ?? [])
-const modelItems = computed(() => [...new Map([...state.models, ...availableModels.value].map(m => [m.id, { ...m, label: (m.label ?? m.id) + (m.tools === false ? ' (AI functions only)' : '') }])).values()])
-const selectedModels = computed({ get: () => state.models.map(m => m.id), set: (ids: string[]) => { state.models = ids.flatMap(id => { const m = [...state.models, ...availableModels.value].find(m => m.id === id); return m ? [{ id: m.id, label: m.label, api: m.api, tools: m.tools }] : [] }) } })
+// The catalog is for adding; the chosen models are listed below it, each removable.
+const modelItems = computed(() => availableModels.value.filter(m => !state.models.some(chosen => chosen.id === m.id)).map(m => ({ ...m, label: m.label ?? m.id })))
+const addModel = ref<string>()
+watch(addModel, id => {
+  const model = availableModels.value.find(m => m.id === id)
+  if (model) state.models = [...state.models, { ...model }]
+  addModel.value = undefined
+})
+function removeModel(id: string) { state.models = state.models.filter(m => m.id !== id) }
 watch(() => state.kind, (kind, previous) => { if (!state.name.trim() || state.name === providerNames[previous]) state.name = providerNames[kind] })
 watch(query, () => { page.value = 1 })
 function edit(provider: AgentProviderDTO | null = null) {
@@ -57,7 +69,8 @@ async function save() {
 const local = computed(() => import.meta.client && location.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(location.hostname))
 async function connectChatGPT() {
   if (busy.value) return
-  const popup = local.value ? window.open('about:blank', '_blank') : null
+  // Opened during the click so the browser allows it; OpenAI's page loads once the attempt exists.
+  const popup = window.open('about:blank', '_blank')
   busy.value = true
   try {
     const id = await persist()
@@ -67,7 +80,17 @@ async function connectChatGPT() {
   } catch (error) { popup?.close(); toast.add({ title: errorMessage(error), color: 'error' }) }
   finally { busy.value = false }
 }
-const helperCommand = computed(() => connection.value && import.meta.client ? `node connect-chatgpt.mjs '${location.origin}' '${connection.value.authorizationUrl}'` : '')
+// OpenAI returns ChatGPT sign-in only to 127.0.0.1. On a hosted Server nothing listens there, so the
+// browser shows a connection error whose address holds the one-time code; pasting it finishes here.
+const callbackUrl = ref(''), finishing = ref(false)
+const callbackValid = computed(() => { try { const url = new URL(callbackUrl.value.trim()); return url.origin === 'http://127.0.0.1:1455' && url.pathname === '/auth/callback' && url.searchParams.has('state') } catch { return false } })
+async function finishChatGPT() {
+  if (!callbackValid.value || finishing.value) return
+  finishing.value = true
+  try { await api('/api/agent-auth/complete', { method: 'POST', body: { callbackUrl: callbackUrl.value.trim() } }); callbackUrl.value = ''; await connecting.refetch() }
+  catch (error) { toast.add({ title: errorMessage(error), color: 'error' }) }
+  finally { finishing.value = false }
+}
 watch(() => connecting.data.value, value => {
   if (!connection.value || !editing.value) return
   if (connection.value.expiresAt < Date.now()) { connection.value = null; toast.add({ title: 'Sign-in expired', description: 'Continue with ChatGPT again.', color: 'warning' }); return }
@@ -88,7 +111,7 @@ async function setDefault(model: string) {
   try { await api(`/api/servers/${props.serverId}/agent-providers/default`, { method: 'PUT', body: { model: model === noDefault ? '' : model } }); await refresh() }
   catch (error) { toast.add({ title: errorMessage(error), color: 'error' }) }
 }
-watch(open, value => { if (!value) { state.apiKey = ''; connection.value = null } })
+watch(open, value => { if (!value) { state.apiKey = ''; connection.value = null; callbackUrl.value = '' } })
 watch(() => state.kind, () => { if (!editing.value) { state.models = []; availableModels.value = []; modelError.value = '' } })
 </script>
 
@@ -112,29 +135,55 @@ watch(() => state.kind, () => { if (!editing.value) { state.models = []; availab
     <UPagination v-if="(catalog.data.value?.total ?? 0) > 15" v-model:page="page" :items-per-page="15" :total="catalog.data.value?.total ?? 0" />
     </template>
   </section>
-  <SettingsEditor v-model:open="open" back="Agents" :title="editing ? `Configure ${editing.name}` : 'Add provider'" description="Connect an account and choose models for Agents and AI functions.">
+  <SettingsEditor v-model:open="open" back="Models" :title="editing ? `Configure ${editing.name}` : 'Add provider'" description="Connect an account and choose models for Agents and AI functions.">
     <template #body>
       <UForm id="agent-provider-form" :schema="agentProviderSchema.omit({ apiKey: true })" :state="state" class="space-y-4" @submit="save">
-        <UFormField name="kind" label="Provider"><USelect v-model="state.kind" :items="kinds" :disabled="Boolean(editing)" class="w-full" /></UFormField>
+        <UFormField name="kind" label="Provider">
+          <div v-if="!editing" class="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Provider">
+            <button v-for="kind in kinds" :key="kind.value" type="button" role="radio" :aria-checked="state.kind === kind.value" class="flex flex-col items-start gap-1.5 rounded-md border p-3 text-start transition-colors" :class="state.kind === kind.value ? 'border-primary bg-elevated' : 'border-default hover:bg-elevated/50'" @click="state.kind = kind.value">
+              <UIcon :name="kind.icon" class="size-6 text-highlighted" />
+              <span class="text-sm font-medium text-highlighted">{{ kind.label }}</span>
+              <span class="text-xs text-muted">{{ kind.description }}</span>
+            </button>
+          </div>
+          <div v-else class="flex items-center gap-2 text-sm"><UIcon :name="providerCards[state.kind].icon" class="size-5" /><span>{{ providerNames[state.kind] }}</span></div>
+        </UFormField>
         <UFormField name="name" label="Connection name" description="Distinguish work, personal, or other accounts. Left empty, it uses the provider name."><UInput v-model="state.name" class="w-full" /></UFormField>
         <template v-if="state.kind === 'chatgpt'">
           <p class="text-sm text-muted">{{ editing?.account ? `Connected as ${editing.account}.` : 'Use your ChatGPT plan with Pi.' }} This connection is available only for your requests.</p>
           <UButton label="Continue with ChatGPT" color="neutral" variant="outline" :loading="busy" @click="connectChatGPT" />
           <template v-if="connection">
             <div v-if="local" class="space-y-2"><p class="text-sm text-muted">Finish signing in in the new tab. This page will update automatically.</p><UButton :to="connection.authorizationUrl" target="_blank" label="Open ChatGPT sign-in" color="neutral" variant="link" /></div>
-            <div v-else class="space-y-3">
-              <p class="text-sm text-muted">OpenAI returns sign-in to your computer. Download the helper, then run this command in its folder. It opens your browser and returns the connection to this Server.</p>
-              <UButton to="/connect-chatgpt.mjs" download="connect-chatgpt.mjs" label="Download sign-in helper" icon="i-ph-download" color="neutral" variant="outline" />
-              <pre class="max-h-32 overflow-auto rounded-md bg-elevated p-3 text-xs whitespace-pre-wrap break-all">{{ helperCommand }}</pre>
+            <div v-else class="space-y-3 rounded-md border border-default p-3">
+              <p class="text-sm font-medium text-highlighted">One more step after you approve</p>
+              <p class="text-sm text-muted">ChatGPT then opens a page that cannot load, at an address starting with <code class="text-xs">http://127.0.0.1:1455</code>. That is expected: OpenAI sends the sign-in back to your computer, not to a website. Copy that page’s full address and paste it here.</p>
+              <UInput v-model="callbackUrl" placeholder="http://127.0.0.1:1455/auth/callback?code=…" class="w-full" autocomplete="off" aria-label="Address of the page ChatGPT opened" @keydown.enter.prevent="finishChatGPT" />
+              <div class="flex flex-wrap items-center gap-2">
+                <UButton label="Finish connecting" :disabled="!callbackValid" :loading="finishing" @click="finishChatGPT" />
+                <UButton :to="connection.authorizationUrl" target="_blank" label="Open ChatGPT again" color="neutral" variant="link" />
+              </div>
+              <p class="text-xs text-muted">The address works once and expires in 10 minutes.</p>
             </div>
           </template>
         </template>
         <UFormField v-else name="apiKey" label="API key" :description="editing?.configured ? `Saved: ${editing.keyPreview || '••••••••'}. Leave blank to keep it.` : 'Paste the key from your provider account.'"><UInput v-model="state.apiKey" type="password" autocomplete="new-password" :placeholder="editing?.keyPreview" class="w-full" /></UFormField>
         <template v-if="state.kind !== 'chatgpt' || editing?.configured">
-          <UFormField name="models" label="Models" description="Search the provider catalog and choose which models are available. Models without tool support are offered to AI functions only, never to agents.">
-            <USelectMenu v-model="selectedModels" :items="modelItems" value-key="id" multiple virtualize placeholder="Choose models" class="w-full" :loading="loadingModels" :search-input="{ placeholder: 'Search model names…' }" />
+          <UFormField name="models" label="Models" description="Models listed here appear in the model picker of agent conversations and AI functions. Models without tool support are offered to AI functions only.">
+            <div class="flex gap-2">
+              <USelectMenu v-model="addModel" :items="modelItems" value-key="id" virtualize placeholder="Add a model…" class="min-w-0 flex-1" :loading="loadingModels" :disabled="!availableModels.length" :search-input="{ placeholder: 'Search model names…' }">
+                <template #item-trailing="{ item }"><AgentsModelCapabilities :inputs="item.inputs" :tools="item.tools" :reasoning="item.reasoning" /></template>
+              </USelectMenu>
+              <UButton icon="i-ph-arrow-clockwise" aria-label="Reload provider catalog" color="neutral" variant="ghost" :loading="loadingModels" @click="loadModels" />
+            </div>
           </UFormField>
-          <UButton label="Load models" icon="i-ph-arrow-clockwise" color="neutral" variant="ghost" :loading="loadingModels" @click="loadModels" />
+          <ul v-if="state.models.length" class="divide-y divide-default rounded-md border border-default" aria-label="Chosen models">
+            <li v-for="model in state.models" :key="model.id" class="flex min-h-10 items-center gap-2 py-1.5 pe-1 ps-3 text-sm">
+              <span class="min-w-0 flex-1 truncate" :title="model.id">{{ model.label ?? model.id }}</span>
+              <AgentsModelCapabilities :inputs="model.inputs" :tools="model.tools" :reasoning="model.reasoning" />
+              <UButton icon="i-ph-x" :aria-label="`Remove ${model.label ?? model.id}`" size="xs" color="neutral" variant="ghost" @click="removeModel(model.id)" />
+            </li>
+          </ul>
+          <p v-else class="text-sm text-muted">No models chosen yet.</p>
           <p v-if="modelError" class="text-sm text-error" role="alert">{{ modelError }}</p>
           <UFormField name="enabled" label="Available to agents"><USwitch v-model="state.enabled" /></UFormField>
         </template>
