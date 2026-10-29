@@ -304,6 +304,8 @@ export type MailboxDTO = {
   enabled: boolean
   permission: MailboxPermission
   unreadCount: number
+  /** Whether outbound email can carry attachments: the Server has file storage. */
+  attachments?: boolean
 }
 
 export type MailThreadDTO = {
@@ -330,7 +332,26 @@ export type MailMessageDTO = MessageDTO & {
     /** Why the last delivery attempt failed, when it did. */
     deliveryError: string | null
     deliveryUncertain?: boolean
+    /** `markdown` was sent as HTML; `content` is its text alternative. */
+    format?: 'text' | 'markdown'
   }
+}
+
+/** An email being written, visible only to its author. A reply draft has a `threadId`. */
+export type MailDraftDTO = {
+  id: string
+  mailboxChannelId: string
+  threadId: string | null
+  /** The conversation's subject, for a reply draft. */
+  threadSubject: string | null
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  subject: string
+  content: string
+  format: 'text' | 'markdown'
+  attachments: AttachmentDTO[]
+  updatedAt: string
 }
 
 export type MailThreadPageDTO = {

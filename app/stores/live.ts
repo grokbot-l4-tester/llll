@@ -5,6 +5,7 @@ import type { LiveKind, LiveState } from '~~/shared/types'
 import { LIVE_RING_TIMEOUT_MS, liveEndedTitle, liveTitle } from '~~/shared/live'
 import type { ServerLiveChangedEvent } from '~~/shared/server-realtime'
 import type { LiveJoinOptions } from '../composables/useLiveSession'
+import { plainFetch } from '../composables/useApi'
 import { liveJoinProblem, liveMediaProblem, type LiveMediaControl } from '../utils/live-errors'
 
 /** `reconnecting` keeps the person in the room while a dropped media connection is restored. */
@@ -225,7 +226,7 @@ export const useLiveStore = defineStore('live', () => {
     endLocal(null)
     let replaced = false
     try {
-      replaced = (await $fetch<{ joined: boolean }>(`/api/channels/${channelId}/live/heartbeat`, { method: 'POST' })).joined
+      replaced = (await plainFetch<{ joined: boolean }>(`/api/channels/${channelId}/live/heartbeat`, { method: 'POST' })).joined
     }
     catch { /* someone who lost access cannot ask, and was removed */ }
     notice.value = replaced ? 'You joined from another tab or device' : 'You were removed from the live session'
@@ -265,7 +266,7 @@ export const useLiveStore = defineStore('live', () => {
       const channelId = currentChannelId.value
       if (!channelId || connection.value !== 'connected') return
       try {
-        const { joined } = await $fetch<{ joined: boolean }>(`/api/channels/${channelId}/live/heartbeat`, { method: 'POST' })
+        const { joined } = await plainFetch<{ joined: boolean }>(`/api/channels/${channelId}/live/heartbeat`, { method: 'POST' })
         if (!joined && currentChannelId.value === channelId && connection.value === 'connected') endLocal('You are no longer in this live session')
       }
       catch { /* the room expires stale presence when connectivity does not recover */ }
@@ -275,7 +276,7 @@ export const useLiveStore = defineStore('live', () => {
   }
 
   async function notifyLeave(channelId: string) {
-    try { await $fetch(`/api/channels/${channelId}/live/leave`, { method: 'POST' }) }
+    try { await plainFetch(`/api/channels/${channelId}/live/leave`, { method: 'POST' }) }
     catch { /* leaving the media is what the other participants see */ }
   }
 
@@ -289,7 +290,7 @@ export const useLiveStore = defineStore('live', () => {
     let activeMeeting: LiveMeeting | null = null
     let seated = false
     try {
-      const response = await $fetch<{ token: string; meetingId: string; live: LiveState }>(`/api/channels/${channelId}/live`, {
+      const response = await plainFetch<{ token: string; meetingId: string; live: LiveState }>(`/api/channels/${channelId}/live`, {
         method: 'POST',
         ...(rejoinMeetingId ? { body: { meetingId: rejoinMeetingId } } : {}),
       })
@@ -511,7 +512,7 @@ export const useLiveStore = defineStore('live', () => {
     const userId = participant.customParticipantId
     if (!channelId || !userId) return
     try {
-      const response = await $fetch<{ live: LiveState }>(`/api/channels/${channelId}/live/remove`, { method: 'POST', body: { userId } })
+      const response = await plainFetch<{ live: LiveState }>(`/api/channels/${channelId}/live/remove`, { method: 'POST', body: { userId } })
       setState(channelId, response.live)
       setError(null, null)
     }
@@ -556,7 +557,7 @@ export const useLiveStore = defineStore('live', () => {
     const call = incoming.value
     incoming.value = null
     if (!call) return
-    try { await $fetch(`/api/channels/${call.channelId}/live/decline`, { method: 'POST' }) }
+    try { await plainFetch(`/api/channels/${call.channelId}/live/decline`, { method: 'POST' }) }
     catch { /* the call still stops ringing when it times out */ }
   }
 
